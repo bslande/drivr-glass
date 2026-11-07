@@ -91,10 +91,17 @@ export function clearPairCookie(request: Request, sessionId: string): string {
   return parts.join("; ");
 }
 
-/** Browser POST/GET for pairing must come from this host. Missing Origin fails closed. */
+/**
+ * Browser pairing must come from this host.
+ * A present Origin that does not match is rejected.
+ * A missing Origin is allowed only when the browser did not mark the request cross-site.
+ * The pairing verifier cookie is still what binds the waiting browser.
+ */
 export function sameOriginBrowser(request: Request): boolean {
+  const site = (request.headers.get("Sec-Fetch-Site") || "").toLowerCase();
+  if (site === "cross-site") return false;
   const origin = request.headers.get("Origin");
-  if (!origin) return false;
+  if (!origin) return site === "" || site === "same-origin" || site === "none";
   let parsed: URL;
   try {
     parsed = new URL(origin);
@@ -103,7 +110,6 @@ export function sameOriginBrowser(request: Request): boolean {
   }
   const url = new URL(request.url);
   if (parsed.origin !== url.origin) return false;
-  const site = (request.headers.get("Sec-Fetch-Site") || "").toLowerCase();
   if (site && site !== "same-origin" && site !== "none") return false;
   return true;
 }

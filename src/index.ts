@@ -1,6 +1,6 @@
 import { TraceHub } from "./trace-hub";
 import { sanitizeTrace, type RawTrace, type Trace } from "./sanitize";
-import { renderLoginGate, renderPage } from "./page";
+import { renderLoginGate, renderPage, renderPairMessage, renderPairPending } from "./page";
 import { GLASS_UI_VER } from "./ui-ver";
 import { CONSTITUTION_RULES } from "./constitution";
 import {
@@ -37,6 +37,21 @@ const PRIVATE_HEADERS = {
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
 } as const;
+
+function wantsPairDocument(request: Request): boolean {
+  const accept = (request.headers.get("Accept") || "").toLowerCase();
+  if (accept.includes("application/json") && !accept.includes("text/html")) return false;
+  if (accept.includes("text/html")) return true;
+  const ctype = (request.headers.get("Content-Type") || "").toLowerCase();
+  return ctype.includes("application/x-www-form-urlencoded") || ctype.includes("multipart/form-data");
+}
+
+function pairDocument(sessionId: string, message: string, status: number): Response {
+  return new Response(renderPairMessage(sessionId, message), {
+    status,
+    headers: { ...PRIVATE_HEADERS, "Content-Type": "text/html; charset=utf-8" },
+  });
+}
 
 function unauthorized(body: string, contentType: string): Response {
   return new Response(body, {
@@ -118,8 +133,10 @@ export default {
     }
 
     if (path === "/pair" && viaSession && request.method === "POST") {
+      const asDocument = wantsPairDocument(request);
       if (!sameOriginBrowser(request)) {
         console.log(JSON.stringify({ message: "pair_origin_rejected" }));
+        if (asDocument) return pairDocument(env.GLASS_SESSION_ID, "This browser was not accepted. Stay on the glass page and try again.", 403);
         return new Response("origin rejected", { status: 403, headers: PRIVATE_HEADERS });
       }
       const now = Math.floor(Date.now() / 1000);
@@ -143,11 +160,17 @@ export default {
       }
       if (!created.ok) {
         const status = created.error === "busy" ? 429 : 503;
+        const message = created.error === "busy" ? "Too many pairing requests. Wait a minute and try again." : "Pairing did not start.";
+        if (asDocument) return pairDocument(env.GLASS_SESSION_ID, message, status);
         return Response.json({ ok: false, error: created.error }, { status, headers: PRIVATE_HEADERS });
       }
       console.log(JSON.stringify({ message: "pair_started", requestId }));
       const headers = new Headers(PRIVATE_HEADERS);
       headers.set("Set-Cookie", pairCookie(request, env.GLASS_SESSION_ID, verifier));
+      if (asDocument) {
+        headers.set("Content-Type", "text/html; charset=utf-8");
+        return new Response(renderPairPending(env.GLASS_SESSION_ID, requestId, phrase, true), { status: 200, headers });
+      }
       return Response.json(
         { ok: true, requestId, phrase, expiresInSec: PAIR_TTL_SEC, pollMs: PAIR_POLL_MS },
         { status: 201, headers },
@@ -155,27 +178,44 @@ export default {
     }
 
     if (path === "/pair/wait" && viaSession && request.method === "GET") {
+      const asDocument = wantsPairDocument(request);
       if (!sameOriginBrowser(request)) {
+        if (asDocument) return pairDocument(env.GLASS_SESSION_ID, "This browser was not accepted. Stay on the glass page and try again.", 403);
         return new Response("origin rejected", { status: 403, headers: PRIVATE_HEADERS });
       }
       const verifier = readCookie(request, PAIR_COOKIE);
       if (!verifier) {
+        if (asDocument) return pairDocument(env.GLASS_SESSION_ID, "This browser has no pairing in progress.", 401);
         return Response.json({ ok: false, state: "unknown" }, { status: 401, headers: PRIVATE_HEADERS });
       }
       const stub = hubStub(env);
       const result = await stub.pollPair(await sha256Hex(verifier), Math.floor(Date.now() / 1000));
       if (result.state !== "ready") {
         const status = result.state === "pending" ? 200 : 410;
+        if (asDocument && result.state === "pending" && result.requestId && result.phrase) {
+          return new Response(renderPairPending(env.GLASS_SESSION_ID, result.requestId, result.phrase, true), {
+            status: 200,
+            headers: { ...PRIVATE_HEADERS, "Content-Type": "text/html; charset=utf-8" },
+          });
+        }
+        if (asDocument) {
+          return pairDocument(env.GLASS_SESSION_ID, "Pairing ended. Pair again if you are still parked.", status);
+        }
         return Response.json({ ok: result.state === "pending", state: result.state }, { status, headers: PRIVATE_HEADERS });
       }
       const session = await mintSessionCookie(request, env);
       if (!session) {
+        if (asDocument) return pairDocument(env.GLASS_SESSION_ID, "Pairing could not finish.", 500);
         return new Response("session unavailable", { status: 500, headers: PRIVATE_HEADERS });
       }
       const headers = new Headers(PRIVATE_HEADERS);
       headers.append("Set-Cookie", session);
       headers.append("Set-Cookie", clearPairCookie(request, env.GLASS_SESSION_ID));
       console.log(JSON.stringify({ message: "pair_claimed" }));
+      if (asDocument) {
+        headers.set("Location", `/s/${env.GLASS_SESSION_ID}`);
+        return new Response(null, { status: 303, headers });
+      }
       return Response.json({ ok: true, state: "ready" }, { status: 200, headers });
     }
 
@@ -219,7 +259,7 @@ export default {
     if (path === "/" && viaSession && (request.method === "GET" || isHead)) {
       if (!(await canRead(request, env))) {
         console.log(JSON.stringify({ message: "read_unauthorized", route: "html" }));
-        return new Response(isHead ? null : renderLoginGate(), {
+        return new Response(isHead ? null : renderLoginGate(env.GLASS_SESSION_ID), {
           status: 401,
           headers: { ...PRIVATE_HEADERS, "Content-Type": "text/html; charset=utf-8" },
         });

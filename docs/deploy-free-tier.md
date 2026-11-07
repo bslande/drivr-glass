@@ -93,7 +93,7 @@ No Tesla test was run to produce this package. Do not do this while the car is m
 
 1. Park, with the vehicle UI allowing the browser.
 2. Open the open URL from `GLASS_URL.local`. You should see the pairing page, not your notes, and no token field.
-3. Tap **Pair this browser**. The page shows a request id and a three-word phrase. Those are not a password. The page checks for approval about every 5 seconds and stops after about 3 minutes, or as soon as pairing finishes.
+3. Tap **Pair this browser**. The button posts to the full `/s/<id>/pair` path (the open URL has no trailing slash). The page shows a request id and a three-word phrase, or a visible error. Those are not a password. It checks for approval about every 5 seconds and stops after about 3 minutes, or as soon as pairing finishes. If script does not run, the same button still submits and the next page shows the id and phrase.
 4. On your computer, tell Drivr the request id and phrase exactly as shown. Drivr approves that one request with the bearer token from `PUSH_TOKEN.local`. Drivr must not approve any other id.
 5. The waiting browser reloads into the notes. Reload and reconnect must not clear them. The cookie cannot push or clear.
 6. If the phrase expires, pair again. Do not weaken auth to skip this.

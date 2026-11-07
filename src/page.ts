@@ -2,17 +2,21 @@
 
 import { GLASS_UI_VER } from "./ui-ver";
 
-/** Unauthenticated gate. Contains no notes and no write token. */
-export function renderLoginGate(): string {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="robots" content="noindex, nofollow" />
-  <meta name="referrer" content="no-referrer" />
-  <title>Drivr · Pair</title>
-  <style>
+function esc(s: string): string {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** Absolute pair paths. A relative "pair" from /s/<id> (no slash) resolves to /s/pair. */
+export function pairPaths(sessionId: string): { start: string; wait: string; home: string } {
+  const id = encodeURIComponent(sessionId);
+  return { start: `/s/${id}/pair`, wait: `/s/${id}/pair/wait`, home: `/s/${id}` };
+}
+
+const PAIR_STYLE = `
     body { margin: 0; padding: 1.5rem; background: #050607; color: #f2f4f6;
       font-family: "Helvetica Neue", Arial, sans-serif; }
     main { max-width: 32rem; }
@@ -21,15 +25,32 @@ export function renderLoginGate(): string {
     button { margin-top: 1rem; font: inherit; padding: 0.75rem 1rem; }
     .code { font-size: 2rem; letter-spacing: 0.08em; margin: 0.4rem 0; }
     .phrase { font-size: 1.6rem; margin: 0.2rem 0 0.8rem; }
+    #error { color: #ffb86b; min-height: 1.4em; }
     #wait { display: none; }
-  </style>
+`;
+
+/** Unauthenticated gate. Contains no notes and no write token. Works without script. */
+export function renderLoginGate(sessionId: string): string {
+  const paths = pairPaths(sessionId);
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Drivr · Pair</title>
+  <style>${PAIR_STYLE}</style>
 </head>
 <body>
   <main>
     <h1>Drivr notes are private</h1>
     <p>Parked setup only. Do not type this while driving. This page never asks for the write token. Do not put a token in the URL or in chat.</p>
     <p>In-car direct fetch is unsupported. Pair this browser, then tell Drivr the request id and phrase. Drivr approves that exact request from your computer. The phrase and id are not a password.</p>
-    <button type="button" id="start">Pair this browser</button>
+    <p id="error" role="alert"></p>
+    <form id="pair-form" method="post" action="${esc(paths.start)}">
+      <button type="submit" id="start">Pair this browser</button>
+    </form>
     <div id="wait">
       <p>Tell Drivr these two lines, then wait. This screen stops checking when pairing finishes or expires.</p>
       <p class="code" id="request-id"></p>
@@ -39,55 +60,122 @@ export function renderLoginGate(): string {
   </main>
   <script>
   (function () {
+    var form = document.getElementById("pair-form");
     var startBtn = document.getElementById("start");
     var waitEl = document.getElementById("wait");
     var statusEl = document.getElementById("status");
+    var errorEl = document.getElementById("error");
+    var pairUrl = form.getAttribute("action");
+    var waitUrl = pairUrl + "/wait";
     var timer = null;
     var polls = 0;
     var maxPolls = 36;
-    function stop(text) {
+    function fail(text) {
       if (timer) clearTimeout(timer);
       timer = null;
-      statusEl.textContent = text;
+      startBtn.disabled = false;
+      errorEl.textContent = text;
     }
     function poll() {
-      if (polls >= maxPolls) { stop("Pairing expired. Pair again if you are still parked."); return; }
+      if (polls >= maxPolls) { fail("Pairing expired. Pair again if you are still parked."); return; }
       polls += 1;
-      fetch("pair/wait", { headers: { "Accept": "application/json" }, cache: "no-store", credentials: "same-origin" })
-        .then(function (r) { return r.json().then(function (body) { return { ok: r.ok, body: body }; }); })
+      fetch(waitUrl, { headers: { "Accept": "application/json" }, cache: "no-store", credentials: "same-origin" })
+        .then(function (r) { return r.json().then(function (body) { return { status: r.status, body: body }; }); })
         .then(function (res) {
           if (res.body && res.body.state === "ready") {
-            stop("Paired. Opening notes.");
-            window.location.reload();
+            errorEl.textContent = "";
+            statusEl.textContent = "Paired. Opening notes.";
+            window.location.assign(pairUrl.replace(/\\/pair$/, ""));
             return;
           }
-          if (!res.ok || !res.body || res.body.state !== "pending") {
-            stop("Pairing ended. Pair again if you are still parked.");
+          if (res.status !== 200 || !res.body || res.body.state !== "pending") {
+            fail("Pairing ended (" + res.status + "). Pair again if you are still parked.");
             return;
           }
           timer = setTimeout(poll, 5000);
         })
-        .catch(function () { stop("Pairing ended. Pair again if you are still parked."); });
+        .catch(function () { fail("Could not check pairing. The button below still sends the request."); });
     }
-    startBtn.addEventListener("click", function () {
+    form.addEventListener("submit", function (ev) {
+      if (!window.fetch || !window.Promise) return;
+      ev.preventDefault();
       startBtn.disabled = true;
-      fetch("pair", { method: "POST", headers: { "Accept": "application/json" }, credentials: "same-origin" })
-        .then(function (r) { return r.json().then(function (body) { return { ok: r.status === 201, body: body }; }); })
+      errorEl.textContent = "";
+      fetch(pairUrl, { method: "POST", headers: { "Accept": "application/json" }, credentials: "same-origin" })
+        .then(function (r) { return r.text().then(function (text) { return { status: r.status, text: text }; }); })
         .then(function (res) {
-          if (!res.ok || !res.body || !res.body.requestId || !res.body.phrase) {
-            startBtn.disabled = false;
+          var body = null;
+          try { body = JSON.parse(res.text); } catch (e) { body = null; }
+          if (res.status !== 201 || !body || !body.requestId || !body.phrase) {
+            fail(body && body.error ? String(body.error) : ("Pairing did not start (HTTP " + res.status + ")."));
             return;
           }
-          document.getElementById("request-id").textContent = res.body.requestId;
-          document.getElementById("phrase").textContent = res.body.phrase;
+          document.getElementById("request-id").textContent = body.requestId;
+          document.getElementById("phrase").textContent = body.phrase;
           waitEl.style.display = "block";
           polls = 0;
           poll();
         })
-        .catch(function () { startBtn.disabled = false; });
+        .catch(function () { fail("Could not start pairing. Submit the button again."); });
     });
   })();
   </script>
+</body>
+</html>`;
+}
+
+/** Shown after a no-script form POST, and while that browser is still waiting. */
+export function renderPairPending(sessionId: string, requestId: string, phrase: string, refresh: boolean): string {
+  const paths = pairPaths(sessionId);
+  const refreshTag = refresh
+    ? `<meta http-equiv="refresh" content="5;url=${esc(paths.wait)}" />`
+    : "";
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="referrer" content="no-referrer" />
+  ${refreshTag}
+  <title>Drivr · Pair</title>
+  <style>${PAIR_STYLE}</style>
+</head>
+<body>
+  <main>
+    <h1>Tell Drivr these two lines</h1>
+    <p>Parked setup only. These are not a password and they do not open notes by themselves. Drivr must approve this exact request. This page checks for about 3 minutes, then stops.</p>
+    <p class="code">${esc(requestId)}</p>
+    <p class="phrase">${esc(phrase)}</p>
+    <p id="error" role="alert">Waiting for Drivr.</p>
+    <form method="get" action="${esc(paths.wait)}">
+      <button type="submit">Check approval</button>
+    </form>
+  </main>
+</body>
+</html>`;
+}
+
+export function renderPairMessage(sessionId: string, message: string): string {
+  const paths = pairPaths(sessionId);
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Drivr · Pair</title>
+  <style>${PAIR_STYLE}</style>
+</head>
+<body>
+  <main>
+    <h1>Drivr notes are private</h1>
+    <p id="error" role="alert">${esc(message)}</p>
+    <form method="post" action="${esc(paths.start)}">
+      <button type="submit">Pair this browser</button>
+    </form>
+  </main>
 </body>
 </html>`;
 }

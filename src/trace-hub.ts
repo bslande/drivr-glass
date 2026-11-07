@@ -239,11 +239,14 @@ export class TraceHub extends DurableObject {
    * Poll is only meaningful for the browser whose verifier hash matches one row.
    * Approving does not hand the read cookie to the caller of markPairApproved.
    */
-  pollPair(verifierHash: string, now: number): { state: "pending" | "ready" | "expired" | "unknown" } {
+  pollPair(
+    verifierHash: string,
+    now: number,
+  ): { state: "pending" | "ready" | "expired" | "unknown"; requestId?: string; phrase?: string } {
     this.ensureSchema();
     const rows = this.ctx.storage.sql
-      .exec<{ id: string; exp: number; state: string; polls: number }>(
-        `SELECT id, exp, state, polls FROM pairings WHERE verifier_hash = ?`,
+      .exec<{ id: string; phrase: string; exp: number; state: string; polls: number }>(
+        `SELECT id, phrase, exp, state, polls FROM pairings WHERE verifier_hash = ?`,
         verifierHash,
       )
       .toArray();
@@ -263,7 +266,7 @@ export class TraceHub extends DurableObject {
       this.ctx.storage.sql.exec(`DELETE FROM pairings WHERE id = ?`, row.id);
       return { state: "expired" };
     }
-    return { state: "pending" };
+    return { state: "pending", requestId: row.id, phrase: row.phrase };
   }
 
   async fetch(request: Request): Promise<Response> {
