@@ -1,6 +1,7 @@
 node_modules/
 .wrangler/
 .dev.vars
+.dev.vars.*
 *.local
 PUSH_TOKEN.local
 GLASS_SESSION_ID.local

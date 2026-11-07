@@ -2,6 +2,42 @@
 
 import { GLASS_UI_VER } from "./ui-ver";
 
+/** Unauthenticated gate. Contains no notes. */
+export function renderLoginGate(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Drivr · Sign in</title>
+  <style>
+    body { margin: 0; padding: 1.5rem; background: #050607; color: #f2f4f6;
+      font-family: "Helvetica Neue", Arial, sans-serif; }
+    main { max-width: 28rem; }
+    h1 { font-size: 1.4rem; font-weight: 600; }
+    p { line-height: 1.45; }
+    label { display: block; margin: 1rem 0 0.4rem; }
+    input { width: 100%; font: inherit; padding: 0.7rem; }
+    button { margin-top: 1rem; font: inherit; padding: 0.7rem 1rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Drivr notes are private</h1>
+    <p>Parked setup only. Do not type this while driving, do not paste it into chat, and do not put it in the URL.</p>
+    <p>This page does not make in-car Grok aware of your notes. A plain fetch without this sign-in is rejected.</p>
+    <form method="post" action="session" autocomplete="off">
+      <label for="token">Read token</label>
+      <input id="token" name="token" type="password" autocomplete="off" required />
+      <button type="submit">Show notes</button>
+    </form>
+  </main>
+</body>
+</html>`;
+}
+
 export function renderPage(): string {
   return `<!DOCTYPE html>
 <html lang="en" data-ui-ver="${GLASS_UI_VER}">
@@ -348,8 +384,8 @@ export function renderPage(): string {
     }
     .cap-title {
       margin: 0;
-      font-size: clamp(1.1rem, 3.34vw, 1.628rem);
-      font-weight: 400; line-height: 1.3; letter-spacing: -0.015em;
+      font-size: clamp(1.75rem, 5.2vw, 2.8rem);
+      font-weight: 500; line-height: 1.25; letter-spacing: -0.015em;
       color: var(--fg);
       white-space: normal; overflow: visible; word-break: break-word;
     }
@@ -419,8 +455,8 @@ export function renderPage(): string {
     .cap-dense-title {
       display: block;
       margin: 0;
-      font-size: clamp(0.836rem, 2.02vw, 1.012rem);
-      font-weight: 400; line-height: 1.35; color: var(--fg);
+      font-size: clamp(1.35rem, 3.6vw, 2rem);
+      font-weight: 500; line-height: 1.3; color: var(--fg);
       white-space: normal !important;
       overflow: visible !important;
       text-overflow: clip !important;
@@ -739,13 +775,14 @@ export function renderPage(): string {
       letter-spacing: 0.04em; text-transform: uppercase;
     }
 
+    .fleet-head, #done-panel, #fleet-panel, #research-section, #details-label, #details-rail { display: none !important; }
     footer { margin-top: 2.25rem; font-size: 0.704rem; color: var(--muted); }
   </style>
 </head>
 <body>
   <!-- ${GLASS_UI_VER} -->
   <header>
-    <div class="brand">Drivr · Cabin</div>
+    <div class="brand">Drivr · Notes</div>
     <div class="header-meta">
       <span class="glass-mode" id="glass-mode">Glass idle</span>
       <div class="status" id="status"><span class="live-dot" aria-hidden="true"></span><span id="status-text">Connecting</span></div>
@@ -785,10 +822,10 @@ export function renderPage(): string {
     <p class="empty" id="empty">No bots tracked yet.</p>
   </div>
 
-  <p class="section-label below" id="details-label" hidden>Live activity · cabin Grok</p>
-  <ul id="details-rail" aria-label="Live activity stream for cabin Grok" hidden></ul>
+  <p class="section-label below" id="details-label" hidden>Activity</p>
+  <ul id="details-rail" aria-label="Stored activity" hidden></ul>
 
-  <footer>Drivr glass. Tap-with-voice capture + fleet pulse. Open URL is always /s/&lt;session&gt; (bare host does not redirect). No secrets. America/Denver times. <span class="ver">${GLASS_UI_VER}</span></footer>
+  <footer>Drivr notes, to-dos, and ideas. Parked display only — do not tap this screen while driving. Connected means this browser is attached. It does not make in-car Grok aware. Open URL is /s/&lt;session&gt;. No secrets in the URL. <span class="ver">${GLASS_UI_VER}</span></footer>
 
   <script>
   (function () {
@@ -817,7 +854,7 @@ export function renderPage(): string {
     var doneCountEl = document.getElementById("done-count");
     var selectedCaptureKey = null;
     var selectedCaptureShell = null;
-    var captureShellExpandedBy = { todo: false, idea: false, note: false };
+    var captureShellExpandedBy = { todo: true, idea: true, note: true };
     var glassSessionId = (function () {
       var parts = String(location.pathname || "").split("/");
       for (var gi = 0; gi < parts.length - 1; gi++) {
@@ -1142,7 +1179,7 @@ export function renderPage(): string {
             : '<p class="cap-dense-body">' + esc(clipDense(body, 280)) + "</p>";
         }
         if (selected) {
-          var deepRaw = String(it.detail || "").trim() || "Say this to in-car Grok to act — context lives on the glass so Grok need not ask.";
+          var deepRaw = String(it.detail || "").trim() || "Stored on this glass. In-car Grok is not automatically aware of it.";
           fullDetail =
             '<p class="cap-detail">' + linkifyHtml(deepRaw) + "</p>" +
             relatedRefsHtml(it, items);
@@ -1235,7 +1272,7 @@ export function renderPage(): string {
       if (!totalOpen) {
         captureEmpty.hidden = false;
         captureCount.hidden = true;
-        captureShellExpandedBy = { todo: false, idea: false, note: false };
+        captureShellExpandedBy = { todo: true, idea: true, note: true };
         selectedCaptureKey = null;
         selectedCaptureShell = null;
       } else {
@@ -2495,7 +2532,7 @@ export function renderPage(): string {
         })
         .then(function (data) {
           if (applyServerPayload(data)) return;
-          setStatus("Live", "live");
+          setStatus("Connected", "live");
           if (thenConnect) connect();
         })
         .catch(function (err) {
@@ -2523,13 +2560,13 @@ export function renderPage(): string {
         try {
           var data = JSON.parse(ev.data);
           if (applyServerPayload(data)) return;
-          setStatus("Live", "live");
+          setStatus("Connected", "live");
         } catch (e) {}
       });
       es.addEventListener("trace", function (ev) {
         try {
           upsert(JSON.parse(ev.data));
-          setStatus("Live", "live");
+          setStatus("Connected", "live");
         } catch (e) {}
       });
       es.onerror = function () {

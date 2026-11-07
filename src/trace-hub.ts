@@ -175,7 +175,7 @@ export class TraceHub extends DurableObject {
     const path = url.pathname;
 
     if (path === "/events" && request.method === "GET") {
-      return this.openSse();
+      return this.openSse(request.signal, request.headers.get("x-glass-once") === "1");
     }
 
     if (path === "/push" && request.method === "POST") {
@@ -208,20 +208,44 @@ export class TraceHub extends DurableObject {
     return new Response("Not found", { status: 404 });
   }
 
-  private openSse(): Response {
+  private openSse(signal: AbortSignal, once: boolean): Response {
     const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
     const writer = writable.getWriter();
     const client: SseClient = { writer, alive: true };
     this.clients.add(client);
+    const stop = () => {
+      client.alive = false;
+    };
+    if (signal.aborted) stop();
+    else signal.addEventListener("abort", stop, { once: true });
 
     const start = async () => {
       try {
         await writer.write(
           this.sseFrame("snapshot", { ui: GLASS_UI_VER, traces: this.listTraces() }),
         );
+        // One-shot readers (tests, and any authorized client that asks) stop after the snapshot.
+        // The browser EventSource does not send this header, so it keeps the heartbeat.
+        if (once) {
+          client.alive = false;
+          return;
+        }
+        await scheduler.wait(0);
         while (client.alive) {
-          await scheduler.wait(HEARTBEAT_MS);
-          if (!client.alive) break;
+          await Promise.race([
+            scheduler.wait(HEARTBEAT_MS),
+            new Promise<void>((resolve) => {
+              if (!client.alive || signal.aborted) {
+                resolve();
+                return;
+              }
+              signal.addEventListener("abort", () => resolve(), { once: true });
+            }),
+          ]);
+          if (!client.alive || signal.aborted) {
+            client.alive = false;
+            break;
+          }
           try {
             await writer.write(this.encoder.encode(": keepalive\n\n"));
           } catch {

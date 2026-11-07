@@ -1,6 +1,6 @@
 {
   "name": "drivr-glass",
-  "version": "2026.11.05-1",
+  "version": "2026.11.07-1",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -9,10 +9,13 @@
     "types": "wrangler types",
     "dev": "wrangler dev",
     "check": "tsc --noEmit",
+    "test": "vitest run",
     "secret:push": "wrangler secret put PUSH_TOKEN"
   },
   "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.6.0",
     "typescript": "^5.9.3",
+    "vitest": "^4.1.12",
     "wrangler": "^4.45.0"
   }
 }

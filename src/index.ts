@@ -1,6 +1,6 @@
 import { TraceHub } from "./trace-hub";
 import { sanitizeTrace, type RawTrace, type Trace } from "./sanitize";
-import { renderPage } from "./page";
+import { renderLoginGate, renderPage } from "./page";
 import { GLASS_UI_VER } from "./ui-ver";
 import { CONSTITUTION_RULES } from "./constitution";
 import {
@@ -8,26 +8,32 @@ import {
   formatSnapshotText,
   wantsSnapshotJson,
 } from "./snapshot";
+import {
+  bearerMatches,
+  canRead,
+  mintSessionCookie,
+  rejectsCredentialInQuery,
+  timingSafeEqualString,
+  tokenFromLoginBody,
+} from "./read-auth";
 
 export { TraceHub };
 
-async function timingSafeEqualString(a: string, b: string): Promise<boolean> {
-  const enc = new TextEncoder();
-  const [ah, bh] = await Promise.all([
-    crypto.subtle.digest("SHA-256", enc.encode(a)),
-    crypto.subtle.digest("SHA-256", enc.encode(b)),
-  ]);
-  return crypto.subtle.timingSafeEqual(ah, bh);
+const PRIVATE_HEADERS = {
+  "Cache-Control": "no-store, no-cache, must-revalidate",
+  "X-Content-Type-Options": "nosniff",
+  "Referrer-Policy": "no-referrer",
+} as const;
+
+function unauthorized(body: string, contentType: string): Response {
+  return new Response(body, {
+    status: 401,
+    headers: { ...PRIVATE_HEADERS, "Content-Type": contentType },
+  });
 }
 
 async function authorizePush(request: Request, env: Env): Promise<boolean> {
-  const header = request.headers.get("Authorization") || "";
-  const match = /^Bearer\s+(.+)$/i.exec(header);
-  if (!match) return false;
-  const provided = match[1].trim();
-  const expected = env.PUSH_TOKEN;
-  if (!expected) return false;
-  return timingSafeEqualString(provided, expected);
+  return bearerMatches(request, env);
 }
 
 function hubStub(env: Env): DurableObjectStub {
@@ -57,6 +63,13 @@ export default {
     const url = new URL(request.url);
     let path = url.pathname;
 
+    if (rejectsCredentialInQuery(url)) {
+      return new Response("credentials are not accepted in the URL", {
+        status: 400,
+        headers: { ...PRIVATE_HEADERS, "Content-Type": "text/plain; charset=utf-8" },
+      });
+    }
+
     const rewritten = rewriteSessionPath(path, env.GLASS_SESSION_ID);
     if (rewritten === null) {
       return new Response("Not found", { status: 404 });
@@ -82,14 +95,49 @@ export default {
       });
     }
 
+    if (path === "/session" && viaSession && request.method === "POST") {
+      const fromBearer = await bearerMatches(request, env);
+      let presented = fromBearer;
+      if (!presented) {
+        const token = await tokenFromLoginBody(request);
+        const expected = env.PUSH_TOKEN;
+        presented = Boolean(token && expected && (await timingSafeEqualString(token, expected)));
+      }
+      if (!presented) {
+        console.log(JSON.stringify({ message: "session_unauthorized" }));
+        return new Response(renderLoginGate(), {
+          status: 401,
+          headers: { ...PRIVATE_HEADERS, "Content-Type": "text/html; charset=utf-8" },
+        });
+      }
+      const cookie = await mintSessionCookie(request, env);
+      if (!cookie) {
+        return new Response("session unavailable", { status: 500, headers: PRIVATE_HEADERS });
+      }
+      const headers = new Headers(PRIVATE_HEADERS);
+      headers.set("Set-Cookie", cookie);
+      const wantsJson = (request.headers.get("Accept") || "").includes("application/json")
+        && !(request.headers.get("Content-Type") || "").includes("application/x-www-form-urlencoded");
+      if (wantsJson) {
+        return new Response(null, { status: 204, headers });
+      }
+      headers.set("Location", `/s/${env.GLASS_SESSION_ID}`);
+      return new Response(null, { status: 303, headers });
+    }
+
     if (path === "/" && viaSession && (request.method === "GET" || isHead)) {
+      if (!(await canRead(request, env))) {
+        console.log(JSON.stringify({ message: "read_unauthorized", route: "html" }));
+        return new Response(isHead ? null : renderLoginGate(), {
+          status: 401,
+          headers: { ...PRIVATE_HEADERS, "Content-Type": "text/html; charset=utf-8" },
+        });
+      }
       return new Response(isHead ? null : renderPage(), {
         status: 200,
         headers: {
           "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "no-store",
-          "X-Content-Type-Options": "nosniff",
-          "Referrer-Policy": "no-referrer",
+          ...PRIVATE_HEADERS,
         },
       });
     }
@@ -99,7 +147,15 @@ export default {
       if (!viaSession) {
         return new Response("Not found", { status: 404, headers: { "Cache-Control": "no-store" } });
       }
-      return hubStub(env).fetch(new Request(new URL("/events", request.url), request));
+      if (!(await canRead(request, env))) {
+        console.log(JSON.stringify({ message: "read_unauthorized", route: "events" }));
+        return unauthorized("unauthorized", "text/plain; charset=utf-8");
+      }
+      const headers = new Headers();
+      if (request.headers.get("x-glass-once") === "1") headers.set("x-glass-once", "1");
+      return hubStub(env).fetch(
+        new Request(new URL("/events", request.url), { method: "GET", headers, signal: request.signal }),
+      );
     }
 
     if (path === "/push" && request.method === "POST") {
@@ -161,6 +217,10 @@ export default {
       if (!viaSession) {
         return new Response("Not found", { status: 404, headers: { "Cache-Control": "no-store" } });
       }
+      if (!(await canRead(request, env))) {
+        console.log(JSON.stringify({ message: "read_unauthorized", route: "snapshot" }));
+        return unauthorized(isHead ? "" : "unauthorized", "text/plain; charset=utf-8");
+      }
       // Always GET the hub list — HEAD on /snapshot must not forward HEAD into TraceHub.
       const listResp = await hubStub(env).fetch(
         new Request(new URL("/list", request.url), { method: "GET" }),
@@ -197,6 +257,10 @@ export default {
     if (path === "/list" && request.method === "GET") {
       if (!viaSession) {
         return new Response("Not found", { status: 404, headers: { "Cache-Control": "no-store" } });
+      }
+      if (!(await canRead(request, env))) {
+        console.log(JSON.stringify({ message: "read_unauthorized", route: "list" }));
+        return unauthorized("unauthorized", "text/plain; charset=utf-8");
       }
       const resp = await hubStub(env).fetch(new Request(new URL("/list", request.url), request));
       const headers = new Headers(resp.headers);
