@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Trace } from "./sanitize";
 import { GLASS_UI_VER } from "./ui-ver";
+import { PAIR_MAX_PENDING, PAIR_MAX_POLLS } from "./pair";
 
 const MAX_TRACES = 50;
 const HEARTBEAT_MS = 25_000;
@@ -55,6 +56,18 @@ export class TraceHub extends DurableObject {
         /* column exists */
       }
     }
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS pairings (
+        id TEXT PRIMARY KEY,
+        phrase TEXT NOT NULL,
+        verifier_hash TEXT NOT NULL,
+        exp INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        polls INTEGER NOT NULL,
+        created INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_pairings_verifier ON pairings(verifier_hash);
+    `);
     this.schemaReady = true;
   }
 
@@ -168,6 +181,89 @@ export class TraceHub extends DurableObject {
     await this.broadcast("snapshot", { ui: GLASS_UI_VER, traces: [] });
     console.log(JSON.stringify({ message: "traces_cleared", deleted: count }));
     return count;
+  }
+
+  /** Drop expired rows. Returns false when too many live requests are already waiting. */
+  private preparePairings(now: number): boolean {
+    this.ensureSchema();
+    this.ctx.storage.sql.exec(`DELETE FROM pairings WHERE exp < ?`, now);
+    const rows = this.ctx.storage.sql
+      .exec<{ c: number }>(`SELECT COUNT(*) AS c FROM pairings WHERE state = 'pending'`)
+      .toArray();
+    return (rows[0]?.c ?? 0) < PAIR_MAX_PENDING;
+  }
+
+  startPair(input: { id: string; phrase: string; verifierHash: string; exp: number; now: number }): { ok: true } | { ok: false; error: string } {
+    if (!this.preparePairings(input.now)) return { ok: false, error: "busy" };
+    try {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO pairings (id, phrase, verifier_hash, exp, state, polls, created) VALUES (?, ?, ?, ?, 'pending', 0, ?)`,
+        input.id,
+        input.phrase,
+        input.verifierHash,
+        input.exp,
+        input.now,
+      );
+    } catch {
+      return { ok: false, error: "exists" };
+    }
+    return { ok: true };
+  }
+
+  lookupPair(id: string, now: number): { phrase: string; state: string; exp: number } | null {
+    this.ensureSchema();
+    const rows = this.ctx.storage.sql
+      .exec<{ phrase: string; state: string; exp: number }>(
+        `SELECT phrase, state, exp FROM pairings WHERE id = ?`,
+        id,
+      )
+      .toArray();
+    const row = rows[0];
+    if (!row || row.exp < now || row.state !== "pending") return null;
+    return row;
+  }
+
+  markPairApproved(id: string): boolean {
+    this.ensureSchema();
+    this.ctx.storage.sql.exec(
+      `UPDATE pairings SET state = 'approved' WHERE id = ? AND state = 'pending'`,
+      id,
+    );
+    const rows = this.ctx.storage.sql
+      .exec<{ state: string }>(`SELECT state FROM pairings WHERE id = ?`, id)
+      .toArray();
+    return rows[0]?.state === "approved";
+  }
+
+  /**
+   * Poll is only meaningful for the browser whose verifier hash matches one row.
+   * Approving does not hand the read cookie to the caller of markPairApproved.
+   */
+  pollPair(verifierHash: string, now: number): { state: "pending" | "ready" | "expired" | "unknown" } {
+    this.ensureSchema();
+    const rows = this.ctx.storage.sql
+      .exec<{ id: string; exp: number; state: string; polls: number }>(
+        `SELECT id, exp, state, polls FROM pairings WHERE verifier_hash = ?`,
+        verifierHash,
+      )
+      .toArray();
+    const row = rows[0];
+    if (!row) return { state: "unknown" };
+    if (row.exp < now || row.polls >= PAIR_MAX_POLLS || row.state === "consumed") {
+      this.ctx.storage.sql.exec(`DELETE FROM pairings WHERE id = ?`, row.id);
+      return { state: "expired" };
+    }
+    const polls = row.polls + 1;
+    if (row.state === "approved") {
+      this.ctx.storage.sql.exec(`UPDATE pairings SET state = 'consumed', polls = ? WHERE id = ?`, polls, row.id);
+      return { state: "ready" };
+    }
+    this.ctx.storage.sql.exec(`UPDATE pairings SET polls = ? WHERE id = ?`, polls, row.id);
+    if (polls >= PAIR_MAX_POLLS) {
+      this.ctx.storage.sql.exec(`DELETE FROM pairings WHERE id = ?`, row.id);
+      return { state: "expired" };
+    }
+    return { state: "pending" };
   }
 
   async fetch(request: Request): Promise<Response> {

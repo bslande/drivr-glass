@@ -2,7 +2,7 @@
 
 import { GLASS_UI_VER } from "./ui-ver";
 
-/** Unauthenticated gate. Contains no notes. */
+/** Unauthenticated gate. Contains no notes and no write token. */
 export function renderLoginGate(): string {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -11,29 +11,83 @@ export function renderLoginGate(): string {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="robots" content="noindex, nofollow" />
   <meta name="referrer" content="no-referrer" />
-  <title>Drivr · Sign in</title>
+  <title>Drivr · Pair</title>
   <style>
     body { margin: 0; padding: 1.5rem; background: #050607; color: #f2f4f6;
       font-family: "Helvetica Neue", Arial, sans-serif; }
-    main { max-width: 28rem; }
-    h1 { font-size: 1.4rem; font-weight: 600; }
+    main { max-width: 32rem; }
+    h1 { font-size: 1.5rem; font-weight: 600; }
     p { line-height: 1.45; }
-    label { display: block; margin: 1rem 0 0.4rem; }
-    input { width: 100%; font: inherit; padding: 0.7rem; }
-    button { margin-top: 1rem; font: inherit; padding: 0.7rem 1rem; }
+    button { margin-top: 1rem; font: inherit; padding: 0.75rem 1rem; }
+    .code { font-size: 2rem; letter-spacing: 0.08em; margin: 0.4rem 0; }
+    .phrase { font-size: 1.6rem; margin: 0.2rem 0 0.8rem; }
+    #wait { display: none; }
   </style>
 </head>
 <body>
   <main>
     <h1>Drivr notes are private</h1>
-    <p>Parked setup only. Do not type this while driving, do not paste it into chat, and do not put it in the URL.</p>
-    <p>This page does not make in-car Grok aware of your notes. A plain fetch without this sign-in is rejected.</p>
-    <form method="post" action="session" autocomplete="off">
-      <label for="token">Read token</label>
-      <input id="token" name="token" type="password" autocomplete="off" required />
-      <button type="submit">Show notes</button>
-    </form>
+    <p>Parked setup only. Do not type this while driving. This page never asks for the write token. Do not put a token in the URL or in chat.</p>
+    <p>In-car direct fetch is unsupported. Pair this browser, then tell Drivr the request id and phrase. Drivr approves that exact request from your computer. The phrase and id are not a password.</p>
+    <button type="button" id="start">Pair this browser</button>
+    <div id="wait">
+      <p>Tell Drivr these two lines, then wait. This screen stops checking when pairing finishes or expires.</p>
+      <p class="code" id="request-id"></p>
+      <p class="phrase" id="phrase"></p>
+      <p id="status">Waiting for Drivr.</p>
+    </div>
   </main>
+  <script>
+  (function () {
+    var startBtn = document.getElementById("start");
+    var waitEl = document.getElementById("wait");
+    var statusEl = document.getElementById("status");
+    var timer = null;
+    var polls = 0;
+    var maxPolls = 36;
+    function stop(text) {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      statusEl.textContent = text;
+    }
+    function poll() {
+      if (polls >= maxPolls) { stop("Pairing expired. Pair again if you are still parked."); return; }
+      polls += 1;
+      fetch("pair/wait", { headers: { "Accept": "application/json" }, cache: "no-store", credentials: "same-origin" })
+        .then(function (r) { return r.json().then(function (body) { return { ok: r.ok, body: body }; }); })
+        .then(function (res) {
+          if (res.body && res.body.state === "ready") {
+            stop("Paired. Opening notes.");
+            window.location.reload();
+            return;
+          }
+          if (!res.ok || !res.body || res.body.state !== "pending") {
+            stop("Pairing ended. Pair again if you are still parked.");
+            return;
+          }
+          timer = setTimeout(poll, 5000);
+        })
+        .catch(function () { stop("Pairing ended. Pair again if you are still parked."); });
+    }
+    startBtn.addEventListener("click", function () {
+      startBtn.disabled = true;
+      fetch("pair", { method: "POST", headers: { "Accept": "application/json" }, credentials: "same-origin" })
+        .then(function (r) { return r.json().then(function (body) { return { ok: r.status === 201, body: body }; }); })
+        .then(function (res) {
+          if (!res.ok || !res.body || !res.body.requestId || !res.body.phrase) {
+            startBtn.disabled = false;
+            return;
+          }
+          document.getElementById("request-id").textContent = res.body.requestId;
+          document.getElementById("phrase").textContent = res.body.phrase;
+          waitEl.style.display = "block";
+          polls = 0;
+          poll();
+        })
+        .catch(function () { startBtn.disabled = false; });
+    });
+  })();
+  </script>
 </body>
 </html>`;
 }

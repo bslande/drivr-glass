@@ -81,7 +81,10 @@ Give Drivr the **open URL only** (not the token). Drivr saves it in memory as `D
 |--------|------|---------|
 | `GET` | `/` | **404** (no redirect; does not disclose session id) |
 | `GET` | `/s/<id>` | Notes HTML when authorized. Otherwise **401** login shell with no notes |
-| `POST` | `/s/<id>/session` | Exchange the bearer token for an HttpOnly read cookie. Token in the form body, never the URL |
+| `POST` | `/s/<id>/pair` | Parked browser starts a short-lived pairing. Response shows a request id and phrase. The write token is not accepted here |
+| `GET` | `/s/<id>/pair/wait` | That same browser polls only while the pairing is pending. On approval it receives a read-only HttpOnly cookie |
+| `POST` | `/s/<id>/pair/approve` | Bearer only. Drivr sends the exact request id and phrase the owner read on the screen |
+| `POST` | `/s/<id>/session` | **410.** A browser cannot submit the write token |
 | `GET` | `/s/<id>/events` | SSE stream when authorized (`text/event-stream`) |
 | `GET` | `/s/<id>/list` | JSON snapshot when authorized |
 | `GET` | `/s/<id>/snapshot` | Plain text (default) or JSON (`?format=json`) when authorized |
@@ -90,6 +93,8 @@ Give Drivr the **open URL only** (not the token). Drivr saves it in memory as `D
 | `GET` | `/health` | Plain `ok` |
 
 Bare `/events`, `/list`, `/snapshot` → 404. Wrong `/s/<id>` → 404. Missing or wrong auth on a real session → **401** and no note text. A credential in the query string → **400**. Refresh, SSE reconnect, and Durable Object eviction do not clear notes.
+
+Parked browser login does not use the write token. The owner taps **Pair this browser**, reads the request id and phrase on that screen, and tells Drivr those two lines. Drivr approves that exact pair with the bearer token from `PUSH_TOKEN.local` on the computer. Only the waiting browser receives the read cookie. The id and phrase are not a password. In-car direct fetch is unsupported. The page polls only during that wait, then stops.
 
 ## Push contract
 

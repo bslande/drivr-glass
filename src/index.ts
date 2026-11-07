@@ -14,8 +14,21 @@ import {
   mintSessionCookie,
   rejectsCredentialInQuery,
   timingSafeEqualString,
-  tokenFromLoginBody,
 } from "./read-auth";
+import {
+  PAIR_POLL_MS,
+  PAIR_TTL_SEC,
+  clearPairCookie,
+  newPhrase,
+  newRequestId,
+  newVerifier,
+  normalizePhrase,
+  pairCookie,
+  readCookie,
+  sameOriginBrowser,
+  sha256Hex,
+  PAIR_COOKIE,
+} from "./pair";
 
 export { TraceHub };
 
@@ -36,7 +49,7 @@ async function authorizePush(request: Request, env: Env): Promise<boolean> {
   return bearerMatches(request, env);
 }
 
-function hubStub(env: Env): DurableObjectStub {
+function hubStub(env: Env): DurableObjectStub<TraceHub> {
   return env.TRACE_HUB.getByName("fleet");
 }
 
@@ -96,33 +109,111 @@ export default {
     }
 
     if (path === "/session" && viaSession && request.method === "POST") {
-      const fromBearer = await bearerMatches(request, env);
-      let presented = fromBearer;
-      if (!presented) {
-        const token = await tokenFromLoginBody(request);
-        const expected = env.PUSH_TOKEN;
-        presented = Boolean(token && expected && (await timingSafeEqualString(token, expected)));
+      // The write token is never accepted from a browser body.
+      console.log(JSON.stringify({ message: "session_rejected" }));
+      return new Response("browser login uses device pairing", {
+        status: 410,
+        headers: { ...PRIVATE_HEADERS, "Content-Type": "text/plain; charset=utf-8" },
+      });
+    }
+
+    if (path === "/pair" && viaSession && request.method === "POST") {
+      if (!sameOriginBrowser(request)) {
+        console.log(JSON.stringify({ message: "pair_origin_rejected" }));
+        return new Response("origin rejected", { status: 403, headers: PRIVATE_HEADERS });
       }
-      if (!presented) {
-        console.log(JSON.stringify({ message: "session_unauthorized" }));
-        return new Response(renderLoginGate(), {
-          status: 401,
-          headers: { ...PRIVATE_HEADERS, "Content-Type": "text/html; charset=utf-8" },
+      const now = Math.floor(Date.now() / 1000);
+      const stub = hubStub(env);
+      let created: { ok: true } | { ok: false; error: string } = { ok: false, error: "exists" };
+      let requestId = "";
+      let phrase = "";
+      let verifier = "";
+      for (let attempt = 0; attempt < 5 && !created.ok; attempt++) {
+        requestId = newRequestId();
+        phrase = newPhrase();
+        verifier = newVerifier();
+        const verifierHash = await sha256Hex(verifier);
+        created = await stub.startPair({
+          id: requestId,
+          phrase,
+          verifierHash,
+          exp: now + PAIR_TTL_SEC,
+          now,
         });
       }
-      const cookie = await mintSessionCookie(request, env);
-      if (!cookie) {
+      if (!created.ok) {
+        const status = created.error === "busy" ? 429 : 503;
+        return Response.json({ ok: false, error: created.error }, { status, headers: PRIVATE_HEADERS });
+      }
+      console.log(JSON.stringify({ message: "pair_started", requestId }));
+      const headers = new Headers(PRIVATE_HEADERS);
+      headers.set("Set-Cookie", pairCookie(request, env.GLASS_SESSION_ID, verifier));
+      return Response.json(
+        { ok: true, requestId, phrase, expiresInSec: PAIR_TTL_SEC, pollMs: PAIR_POLL_MS },
+        { status: 201, headers },
+      );
+    }
+
+    if (path === "/pair/wait" && viaSession && request.method === "GET") {
+      if (!sameOriginBrowser(request)) {
+        return new Response("origin rejected", { status: 403, headers: PRIVATE_HEADERS });
+      }
+      const verifier = readCookie(request, PAIR_COOKIE);
+      if (!verifier) {
+        return Response.json({ ok: false, state: "unknown" }, { status: 401, headers: PRIVATE_HEADERS });
+      }
+      const stub = hubStub(env);
+      const result = await stub.pollPair(await sha256Hex(verifier), Math.floor(Date.now() / 1000));
+      if (result.state !== "ready") {
+        const status = result.state === "pending" ? 200 : 410;
+        return Response.json({ ok: result.state === "pending", state: result.state }, { status, headers: PRIVATE_HEADERS });
+      }
+      const session = await mintSessionCookie(request, env);
+      if (!session) {
         return new Response("session unavailable", { status: 500, headers: PRIVATE_HEADERS });
       }
       const headers = new Headers(PRIVATE_HEADERS);
-      headers.set("Set-Cookie", cookie);
-      const wantsJson = (request.headers.get("Accept") || "").includes("application/json")
-        && !(request.headers.get("Content-Type") || "").includes("application/x-www-form-urlencoded");
-      if (wantsJson) {
-        return new Response(null, { status: 204, headers });
+      headers.append("Set-Cookie", session);
+      headers.append("Set-Cookie", clearPairCookie(request, env.GLASS_SESSION_ID));
+      console.log(JSON.stringify({ message: "pair_claimed" }));
+      return Response.json({ ok: true, state: "ready" }, { status: 200, headers });
+    }
+
+    if (path === "/pair/approve" && viaSession && request.method === "POST") {
+      if (!(await bearerMatches(request, env))) {
+        console.log(JSON.stringify({ message: "pair_approve_unauthorized" }));
+        return Response.json({ ok: false, error: "unauthorized" }, { status: 401, headers: PRIVATE_HEADERS });
       }
-      headers.set("Location", `/s/${env.GLASS_SESSION_ID}`);
-      return new Response(null, { status: 303, headers });
+      let body: { requestId?: unknown; phrase?: unknown };
+      try {
+        body = (await request.json()) as { requestId?: unknown; phrase?: unknown };
+      } catch {
+        return Response.json({ ok: false, error: "invalid JSON" }, { status: 400, headers: PRIVATE_HEADERS });
+      }
+      if (typeof body.requestId !== "string" || typeof body.phrase !== "string") {
+        return Response.json({ ok: false, error: "requestId and phrase are required" }, { status: 400, headers: PRIVATE_HEADERS });
+      }
+      const requestId = body.requestId.trim();
+      const phrase = normalizePhrase(body.phrase);
+      if (!/^[2-9A-HJKLMNP-Z]{8}$/.test(requestId) || !phrase) {
+        return Response.json({ ok: false, error: "no matching request" }, { status: 404, headers: PRIVATE_HEADERS });
+      }
+      const stub = hubStub(env);
+      const now = Math.floor(Date.now() / 1000);
+      const row = await stub.lookupPair(requestId, now);
+      if (!row || row.state !== "pending") {
+        return Response.json({ ok: false, error: "no matching request" }, { status: 404, headers: PRIVATE_HEADERS });
+      }
+      const phraseOk = await timingSafeEqualString(phrase, row.phrase);
+      if (!phraseOk) {
+        return Response.json({ ok: false, error: "no matching request" }, { status: 404, headers: PRIVATE_HEADERS });
+      }
+      const marked = await stub.markPairApproved(requestId);
+      if (!marked) {
+        return Response.json({ ok: false, error: "no matching request" }, { status: 404, headers: PRIVATE_HEADERS });
+      }
+      console.log(JSON.stringify({ message: "pair_approved", requestId }));
+      return Response.json({ ok: true }, { status: 200, headers: PRIVATE_HEADERS });
     }
 
     if (path === "/" && viaSession && (request.method === "GET" || isHead)) {

@@ -87,18 +87,29 @@ This does not clear the glass and does not print notes. Run it whenever you want
 
 The output file is mode 600. It is an authenticated pull. It does not notify in-car Grok.
 
-## Parked Tesla / in-car Grok test (you only)
+## Parked browser pairing (you only)
 
-No Tesla test was run to produce this package. Do not do this while the car is moving. Do not bypass the car's browser lock. Do not hand the token to Grok or put it in a URL.
+No Tesla test was run to produce this package. Do not do this while the car is moving. Do not bypass the car's browser lock. Do not type `PUSH_TOKEN` into the browser, hand it to Grok, or put it in a URL. In-car direct fetch of the snapshot is unsupported.
 
 1. Park, with the vehicle UI allowing the browser.
-2. Open the open URL from `GLASS_URL.local`. You should see the sign-in page, not your notes.
-3. If you want the car browser to try a read, type the token once and submit. The Worker answers with an HttpOnly cookie scoped to `/s/<id>`. The token is not stored in the page.
-4. Reload. Notes that you pushed with the bearer token should still be there. Reload and reconnect must not clear them.
-5. If the browser will not keep the cookie, stop. Reads stay rejected. Do not remove the auth check.
-6. Ask in-car Grok to open the snapshot URL with no token in the prompt. The expected result is HTTP 401 and no notes. That path is blocked: Grok's plain fetch cannot send the bearer header or the browser cookie, and the token must not ride in the URL (traces record query strings; header values are not trace attributes).
-7. Do not describe the glass as something Grok is watching. A "Connected" browser has its own SSE stream. That is not assistant awareness.
-8. Clear only by `./scripts/clear-glass.sh` or the bot's session-start `POST /clear`. Closing the page is not a clear.
+2. Open the open URL from `GLASS_URL.local`. You should see the pairing page, not your notes, and no token field.
+3. Tap **Pair this browser**. The page shows a request id and a three-word phrase. Those are not a password. The page checks for approval about every 5 seconds and stops after about 3 minutes, or as soon as pairing finishes.
+4. On your computer, tell Drivr the request id and phrase exactly as shown. Drivr approves that one request with the bearer token from `PUSH_TOKEN.local`. Drivr must not approve any other id.
+5. The waiting browser reloads into the notes. Reload and reconnect must not clear them. The cookie cannot push or clear.
+6. If the phrase expires, pair again. Do not weaken auth to skip this.
+7. A direct in-car fetch, including Grok opening the snapshot URL, stays HTTP 401. That is not automatic awareness.
+8. Clear only by `./scripts/clear-glass.sh` or the bot's session-start `POST /clear`.
+
+Drivr approval, from the computer, after you confirm the id and phrase:
+
+```bash
+curl -sS -X POST "$(cat GLASS_URL.local)/pair/approve" \
+  -H "Authorization: Bearer $(cat PUSH_TOKEN.local)" \
+  -H "Content-Type: application/json" \
+  -d '{"requestId":"REQUEST_ID","phrase":"word word word"}'
+```
+
+Replace the id and phrase from the parked screen. Do not log the command with `set -x`. The bearer value stays in the local file.
 
 ## Local bundle check
 

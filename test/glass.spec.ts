@@ -45,6 +45,40 @@ async function openEvents(): Promise<string> {
   return text;
 }
 
+function cookieHeader(res: Response, name: string): string {
+  const all = typeof res.headers.getSetCookie === "function"
+    ? res.headers.getSetCookie()
+    : [res.headers.get("Set-Cookie") || ""];
+  const hit = all.find((item) => item.startsWith(name + "="));
+  if (!hit) throw new Error("missing " + name);
+  return hit.split(";")[0];
+}
+
+async function pairedReadCookie(): Promise<string> {
+  const started = await call(sessionUrl("/pair"), {
+    method: "POST",
+    headers: { Origin: "http://example.com", Accept: "application/json" },
+  });
+  expect(started.status).toBe(201);
+  const startedBody = await started.json() as { requestId: string; phrase: string };
+  expect(startedBody.requestId).not.toBe(token());
+  expect(startedBody.phrase).not.toContain(token());
+  const verifier = cookieHeader(started, "drivr_pair");
+  const approved = await call(sessionUrl("/pair/approve"), {
+    method: "POST",
+    headers: bearer({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ requestId: startedBody.requestId, phrase: startedBody.phrase }),
+  });
+  expect(approved.status).toBe(200);
+  const claimed = await call(sessionUrl("/pair/wait"), {
+    headers: { Origin: "http://example.com", Accept: "application/json", Cookie: verifier },
+  });
+  expect(claimed.status).toBe(200);
+  const readCookie = cookieHeader(claimed, "drivr_glass");
+  expect(claimed.headers.getSetCookie().some((item) => item.startsWith("drivr_glass=") && item.includes("HttpOnly"))).toBe(true);
+  return readCookie;
+}
+
 function bearer(extra?: HeadersInit): Headers {
   const headers = new Headers(extra);
   headers.set("Authorization", `Bearer ${token()}`);
@@ -133,17 +167,9 @@ describe("private drivr glass", () => {
     expect(pageBody).toContain("do not tap this screen while driving");
     expect(pageBody).not.toContain(token());
 
-    const login = await call(sessionUrl("/session"), {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: "token=" + encodeURIComponent(token()),
-    });
-    expect(login.status).toBe(303);
-    const setCookie = login.headers.get("Set-Cookie") || "";
-    expect(setCookie).toContain("HttpOnly");
-    expect(setCookie).toContain("SameSite=Strict");
-    expect(setCookie).not.toContain(token());
-    const cookiePair = setCookie.split(";")[0];
+    const cookiePair = await pairedReadCookie();
+    expect(cookiePair.startsWith("drivr_glass=")).toBe(true);
+    expect(cookiePair).not.toContain(token());
 
     const viaCookie = await call(sessionUrl("/snapshot"), { headers: { Cookie: cookiePair } });
     expect(viaCookie.status).toBe(200);
