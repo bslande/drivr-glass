@@ -127,6 +127,10 @@ export function sanitizeTrace(raw: RawTrace): SanitizeResult {
   }
 
   let bot = clip(raw.bot, MAX_BOT);
+  if (bot.toLowerCase() !== "drivr") {
+    return { ok: false, error: "bot must be Drivr" };
+  }
+  bot = "Drivr";
   let summary = clip(raw.summary, MAX_SUMMARY);
 
   if (MEDICAL_RE.test(bot) || MEDICAL_RE.test(summary) || PRIVATE_TERMS_RE.test(bot) || PRIVATE_TERMS_RE.test(summary)) {
@@ -194,11 +198,11 @@ export function sanitizeTrace(raw: RawTrace): SanitizeResult {
     if (typeof raw.kind !== "string") return { ok: false, error: "kind must be a string" };
     kind = clip(stripSensitive(raw.kind), MAX_KIND).toLowerCase() || undefined;
   }
-  // Capture vs Fleet vs Research (locked 2026-10-27 / v-capture-card-15):
-  // - Capture: ONLY explicit kind note|todo|idea|capture
-  // - Research: kind research (digests/news) → Research lane above Fleet
-  // - Fleet: omit kind (or any other non-capture/non-research kind)
+  // This glass stores Drivr notes, to-dos, and ideas only.
   // Never infer kind from status. status is lifecycle only (open/done/working).
+  if (kind !== "note" && kind !== "todo" && kind !== "idea") {
+    return { ok: false, error: "kind must be note, todo, or idea" };
+  }
 
   const out: Omit<Trace, "id"> = { bot, summary, ts };
   if (detail) out.detail = detail;

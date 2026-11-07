@@ -4,29 +4,32 @@
 
 ## Why
 
-- `GET /s/<id>` returns HTML chrome only. Live Capture / Research / Fleet traces are filled in by client JS from `GET /s/<id>/list` + SSE `/s/<id>/events`, so a plain fetch looks empty.
-- `/list` returns raw JSON traces, but not a prose-friendly cabin summary.
+- `GET /s/<id>` returns HTML chrome only after authorization. Live notes, to-dos, and ideas are filled in by client JS from `GET /s/<id>/list` + SSE `/s/<id>/events`.
+- `/list` returns raw JSON traces, but not a prose-friendly summary.
 
-## Design (shipped)
+## Design
 
 `GET /s/<GLASS_SESSION_ID>/snapshot` is a **read twin** of the same TraceHub store:
 
-- Default `text/plain; charset=utf-8` — labeled sections: Constitution, Capture (to-dos / ideas / notes), Research, Fleet.
+- Default `text/plain; charset=utf-8` — Constitution, then nested To-dos, Ideas, and Notes (newest item is the face bullet; older items of that kind are indented under it).
 - `Accept: application/json` or `?format=json` → `{ui, generatedAt, constitution, capture, research, fleet, traces}`.
 - Valid session id required; bare `/snapshot` → 404; wrong id → 404; `Cache-Control: no-store`.
-- Public read (no Bearer), same path obscurity as `/list`.
-- The interactive HTML/SSE glass is unchanged; the DRIVER MODE constitution text is served only here (from `src/constitution.ts`), not rendered on the glass page.
+- **Authorization required.** Bearer token, or the HttpOnly cookie from `POST /s/<id>/session`. Anonymous reads are 401 and contain no notes. A token in the query string is 400.
+- The header states that the snapshot is an authenticated pull. It does not make in-car Grok aware.
 
-## Placeholder at request time
+## In-car Grok and the Tesla browser
 
-The minute the owner (or the in-car assistant on their behalf) asks for something that will end up on the glass, push a Fleet (or Research/Capture) placeholder immediately (`status: working`), then update the same bot card when work completes. Session-start clear empties the glass; after that, every new ask seeds a placeholder first.
+Plain fetch cannot send `Authorization` or the sign-in cookie, and the token must not be placed in the URL or in chat. That retrieval path is **blocked**. Do not treat a 401 as a temporary outage and do not open the snapshot to make the assistant able to read it.
 
-## Capture hierarchy
+A Tesla browser can try the parked login form. This repository's tests demonstrate the cookie in the Workers runtime only. They do not demonstrate a Tesla browser or in-car Grok. If the parked test fails, leave the read blocked.
 
-Notes, to-dos and ideas each nest under one parent card per kind (most recent item on the face, others nested). Do not flatten them into separate top-level cards.
+## Clear
+
+The store survives refresh, SSE reconnect, and Durable Object eviction. `POST /clear` with the bearer token is the only wipe.
 
 ## Non-goals
 
-- Don't break SSE / interactive expand.
-- Don't require auth on public session reads.
+- Don't break SSE / the nested capture cards.
+- Don't put the token in the URL, source, or logs.
 - Don't announce the bare host.
+- Don't claim the assistant is watching the glass.

@@ -8,9 +8,12 @@ You deploy **your own** copy to **your own** Cloudflare account. Nothing here po
 
 ## What you'll end up with
 
-- Open URL (what the car displays): `https://drivr-glass.<your-subdomain>.workers.dev/s/<GLASS_SESSION_ID>`
-- Snapshot URL (what the in-car assistant reads): `…/s/<GLASS_SESSION_ID>/snapshot`
+- Open URL (what the car browser may display after a parked sign-in): `https://drivr-glass.<your-subdomain>.workers.dev/s/<GLASS_SESSION_ID>`
+- Snapshot URL (authenticated pull only): `…/s/<GLASS_SESSION_ID>/snapshot`
 - Bare host `https://drivr-glass.<your-subdomain>.workers.dev/` returns **404** and never redirects, so it can't leak your session id. Never share or speak the bare host as the open line.
+- The session id in the path is not a password. HTML, `/list`, `/snapshot`, and `/events` reject anonymous requests. Notes are not readable without the bearer token or a cookie from `POST /session`.
+
+Deployment steps and free-tier resources: `docs/deploy-free-tier.md`.
 
 Examples below use `https://drivr-glass.example.workers.dev/s/REPLACE_ME_GLASS_SESSION_ID`.
 
@@ -77,15 +80,21 @@ Give Drivr the **open URL only** (not the token). Drivr saves it in memory as `D
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/` | **404** (no redirect; does not disclose session id) |
-| `GET` | `/s/<id>` | Driving-safe HTML (canonical open URL) |
-| `GET` | `/s/<id>/events` | SSE stream (`text/event-stream`) |
-| `GET` | `/s/<id>/list` | JSON snapshot of recent traces |
-| `GET` | `/s/<id>/snapshot` | Plain text (default) or JSON (`?format=json`) for in-car assistants |
-| `POST` | `/s/<id>/push` (or `/push`) | Authenticated push (Bearer required) |
-| `POST` | `/s/<id>/clear` (or `/clear`) | Authenticated wipe of all traces + empty SSE snapshot |
+| `GET` | `/s/<id>` | Notes HTML when authorized. Otherwise **401** login shell with no notes |
+| `POST` | `/s/<id>/pair` | Parked browser starts a short-lived pairing. Response shows a request id and phrase. The write token is not accepted here |
+| `GET` | `/s/<id>/pair/wait` | That same browser polls only while the pairing is pending. On approval it receives a read-only HttpOnly cookie |
+| `POST` | `/s/<id>/pair/approve` | Bearer only. Drivr sends the exact request id and phrase the owner read on the screen |
+| `POST` | `/s/<id>/session` | **410.** A browser cannot submit the write token |
+| `GET` | `/s/<id>/events` | SSE stream when authorized (`text/event-stream`) |
+| `GET` | `/s/<id>/list` | JSON snapshot when authorized |
+| `GET` | `/s/<id>/snapshot` | Plain text (default) or JSON (`?format=json`) when authorized |
+| `POST` | `/s/<id>/push` (or `/push`) | Bearer write. Cookie alone is not enough |
+| `POST` | `/s/<id>/clear` (or `/clear`) | Bearer wipe. Cookie alone is not enough. This is the only clear |
 | `GET` | `/health` | Plain `ok` |
 
-Bare `/events`, `/list`, `/snapshot` → 404. Wrong `/s/<id>` → 404.
+Bare `/events`, `/list`, `/snapshot` → 404. Wrong `/s/<id>` → 404. Missing or wrong auth on a real session → **401** and no note text. A credential in the query string → **400**. Refresh, SSE reconnect, and Durable Object eviction do not clear notes.
+
+Parked browser login does not use the write token. The owner taps **Pair this browser**, reads the request id and phrase on that screen, and tells Drivr those two lines. Drivr approves that exact pair with the bearer token from `PUSH_TOKEN.local` on the computer. Only the waiting browser receives the read cookie. The id and phrase are not a password. In-car direct fetch is unsupported. The page polls only during that wait, then stops.
 
 ## Push contract
 
@@ -97,13 +106,13 @@ Bare `/events`, `/list`, `/snapshot` → 404. Wrong `/s/<id>` → 404.
 
 | Field | Required | Limits |
 |-------|----------|--------|
-| `bot` | yes | ≤ 40 — card key (one card per bot, updated in place) |
+| `bot` | yes | must be `Drivr` |
 | `summary` | yes | ≤ 280 — brief narrative, not a title slug |
-| `detail` | no | ≤ 4000 — expanded body / in-car context |
+| `detail` | no | ≤ 4000 — expanded body |
 | `result` | no | ≤ 4000 — preferred expanded body |
-| `from` | no | ≤ 40 — creating bot when `bot` is a specialist label |
+| `from` | no | ≤ 40 |
 | `status` | no | ≤ 24 — `open`, `done`, `working`, … |
-| `kind` | no | ≤ 24 — capture: `note` \| `todo` \| `idea` \| `capture`; research: `research`; omit for fleet activity |
+| `kind` | yes | `note`, `todo`, or `idea` only |
 | `ts` | no | ISO-8601; omit → server now |
 
 Mark done: re-push the same `summary` + `kind` with `"status":"done"`. Success: `201 {"ok":true,"trace":{…}}`. Errors: `401` unauthorized, `400` validation / sanitize reject.
@@ -127,7 +136,7 @@ curl -sS -X POST "$(cat GLASS_URL.local)/push" \
 
 ## Storage
 
-Durable Object `TraceHub` (SQLite), instance `fleet`. Keeps the last ~50 traces. Each new Drivr session clears it; durable history lives in your Drivr store, not on the glass.
+Durable Object `TraceHub` (SQLite), instance `fleet`. Keeps the last ~50 traces. Nothing in the Worker clears them on page load, SSE reconnect, or eviction. Clear only by an explicit bearer `POST /clear` (Drivr does that at session start, or when you ask). A later Markdown copy on the bot computer is `scripts/capture-markdown.sh`; it reads the same store and does not clear it. The glass does not push notes to in-car Grok.
 
 ## Rotating your id or token
 
@@ -138,4 +147,5 @@ New id: generate a new `GLASS_SESSION_ID.local`, update `vars.GLASS_SESSION_ID`,
 ```bash
 npx wrangler types   # regenerates worker-configuration.d.ts if you change bindings
 npx tsc --noEmit
+npm test             # unauth rejected, bearer read/write, cookie read, retention, clear
 ```
