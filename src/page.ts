@@ -2,6 +2,184 @@
 
 import { GLASS_UI_VER } from "./ui-ver";
 
+function esc(s: string): string {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** Absolute pair paths. A relative "pair" from /s/<id> (no slash) resolves to /s/pair. */
+export function pairPaths(sessionId: string): { start: string; wait: string; home: string } {
+  const id = encodeURIComponent(sessionId);
+  return { start: `/s/${id}/pair`, wait: `/s/${id}/pair/wait`, home: `/s/${id}` };
+}
+
+const PAIR_STYLE = `
+    body { margin: 0; padding: 1.5rem; background: #050607; color: #f2f4f6;
+      font-family: "Helvetica Neue", Arial, sans-serif; }
+    main { max-width: 32rem; }
+    h1 { font-size: 1.5rem; font-weight: 600; }
+    p { line-height: 1.45; }
+    button { margin-top: 1rem; font: inherit; padding: 0.75rem 1rem; }
+    .code { font-size: 2rem; letter-spacing: 0.08em; margin: 0.4rem 0; }
+    .phrase { font-size: 1.6rem; margin: 0.2rem 0 0.8rem; }
+    #error { color: #ffb86b; min-height: 1.4em; }
+    #wait { display: none; }
+`;
+
+/** Unauthenticated gate. Contains no notes and no write token. Works without script. */
+export function renderLoginGate(sessionId: string): string {
+  const paths = pairPaths(sessionId);
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Drivr · Pair</title>
+  <style>${PAIR_STYLE}</style>
+</head>
+<body>
+  <main>
+    <h1>Drivr notes are private</h1>
+    <p>Parked setup only. Do not type this while driving. This page never asks for the write token. Do not put a token in the URL or in chat.</p>
+    <p>In-car direct fetch is unsupported. Pair this browser, then tell Drivr the request id and phrase. Drivr approves that exact request from your computer. The phrase and id are not a password.</p>
+    <p id="error" role="alert"></p>
+    <form id="pair-form" method="post" action="${esc(paths.start)}">
+      <button type="submit" id="start">Pair this browser</button>
+    </form>
+    <div id="wait">
+      <p>Tell Drivr these two lines, then wait. This screen stops checking when pairing finishes or expires.</p>
+      <p class="code" id="request-id"></p>
+      <p class="phrase" id="phrase"></p>
+      <p id="status">Waiting for Drivr.</p>
+    </div>
+  </main>
+  <script>
+  (function () {
+    var form = document.getElementById("pair-form");
+    var startBtn = document.getElementById("start");
+    var waitEl = document.getElementById("wait");
+    var statusEl = document.getElementById("status");
+    var errorEl = document.getElementById("error");
+    var pairUrl = form.getAttribute("action");
+    var waitUrl = pairUrl + "/wait";
+    var timer = null;
+    var polls = 0;
+    var maxPolls = 36;
+    function fail(text) {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      startBtn.disabled = false;
+      errorEl.textContent = text;
+    }
+    function poll() {
+      if (polls >= maxPolls) { fail("Pairing expired. Pair again if you are still parked."); return; }
+      polls += 1;
+      fetch(waitUrl, { headers: { "Accept": "application/json" }, cache: "no-store", credentials: "same-origin" })
+        .then(function (r) { return r.json().then(function (body) { return { status: r.status, body: body }; }); })
+        .then(function (res) {
+          if (res.body && res.body.state === "ready") {
+            errorEl.textContent = "";
+            statusEl.textContent = "Paired. Opening notes.";
+            window.location.assign(pairUrl.replace(/\\/pair$/, ""));
+            return;
+          }
+          if (res.status !== 200 || !res.body || res.body.state !== "pending") {
+            fail("Pairing ended (" + res.status + "). Pair again if you are still parked.");
+            return;
+          }
+          timer = setTimeout(poll, 5000);
+        })
+        .catch(function () { fail("Could not check pairing. The button below still sends the request."); });
+    }
+    form.addEventListener("submit", function (ev) {
+      if (!window.fetch || !window.Promise) return;
+      ev.preventDefault();
+      startBtn.disabled = true;
+      errorEl.textContent = "";
+      fetch(pairUrl, { method: "POST", headers: { "Accept": "application/json" }, credentials: "same-origin" })
+        .then(function (r) { return r.text().then(function (text) { return { status: r.status, text: text }; }); })
+        .then(function (res) {
+          var body = null;
+          try { body = JSON.parse(res.text); } catch (e) { body = null; }
+          if (res.status !== 201 || !body || !body.requestId || !body.phrase) {
+            fail(body && body.error ? String(body.error) : ("Pairing did not start (HTTP " + res.status + ")."));
+            return;
+          }
+          document.getElementById("request-id").textContent = body.requestId;
+          document.getElementById("phrase").textContent = body.phrase;
+          waitEl.style.display = "block";
+          polls = 0;
+          poll();
+        })
+        .catch(function () { fail("Could not start pairing. Submit the button again."); });
+    });
+  })();
+  </script>
+</body>
+</html>`;
+}
+
+/** Shown after a no-script form POST, and while that browser is still waiting. */
+export function renderPairPending(sessionId: string, requestId: string, phrase: string, refresh: boolean): string {
+  const paths = pairPaths(sessionId);
+  const refreshTag = refresh
+    ? `<meta http-equiv="refresh" content="5;url=${esc(paths.wait)}" />`
+    : "";
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="referrer" content="no-referrer" />
+  ${refreshTag}
+  <title>Drivr · Pair</title>
+  <style>${PAIR_STYLE}</style>
+</head>
+<body>
+  <main>
+    <h1>Tell Drivr these two lines</h1>
+    <p>Parked setup only. These are not a password and they do not open notes by themselves. Drivr must approve this exact request. This page checks for about 3 minutes, then stops.</p>
+    <p class="code">${esc(requestId)}</p>
+    <p class="phrase">${esc(phrase)}</p>
+    <p id="error" role="alert">Waiting for Drivr.</p>
+    <form method="get" action="${esc(paths.wait)}">
+      <button type="submit">Check approval</button>
+    </form>
+  </main>
+</body>
+</html>`;
+}
+
+export function renderPairMessage(sessionId: string, message: string): string {
+  const paths = pairPaths(sessionId);
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Drivr · Pair</title>
+  <style>${PAIR_STYLE}</style>
+</head>
+<body>
+  <main>
+    <h1>Drivr notes are private</h1>
+    <p id="error" role="alert">${esc(message)}</p>
+    <form method="post" action="${esc(paths.start)}">
+      <button type="submit">Pair this browser</button>
+    </form>
+  </main>
+</body>
+</html>`;
+}
+
 export function renderPage(): string {
   return `<!DOCTYPE html>
 <html lang="en" data-ui-ver="${GLASS_UI_VER}">
@@ -348,8 +526,8 @@ export function renderPage(): string {
     }
     .cap-title {
       margin: 0;
-      font-size: clamp(1.1rem, 3.34vw, 1.628rem);
-      font-weight: 400; line-height: 1.3; letter-spacing: -0.015em;
+      font-size: clamp(1.75rem, 5.2vw, 2.8rem);
+      font-weight: 500; line-height: 1.25; letter-spacing: -0.015em;
       color: var(--fg);
       white-space: normal; overflow: visible; word-break: break-word;
     }
@@ -419,8 +597,8 @@ export function renderPage(): string {
     .cap-dense-title {
       display: block;
       margin: 0;
-      font-size: clamp(0.836rem, 2.02vw, 1.012rem);
-      font-weight: 400; line-height: 1.35; color: var(--fg);
+      font-size: clamp(1.35rem, 3.6vw, 2rem);
+      font-weight: 500; line-height: 1.3; color: var(--fg);
       white-space: normal !important;
       overflow: visible !important;
       text-overflow: clip !important;
@@ -739,18 +917,87 @@ export function renderPage(): string {
       letter-spacing: 0.04em; text-transform: uppercase;
     }
 
+
+    /* —— Task board (read-only, glanceable, parked display) —— */
+    #board-section { margin: 0 0 1.35rem; }
+    #board-section .section-label { margin-bottom: 0.3rem; }
+    .board-updated {
+      margin: 0 0 0.65rem;
+      font-size: clamp(0.748rem, 1.76vw, 0.88rem);
+      color: var(--muted);
+    }
+    .board-group { margin: 0 0 0.85rem; }
+    .board-group-label {
+      margin: 0 0 0.35rem;
+      font-size: clamp(0.88rem, 2.1vw, 1.12rem);
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--soft);
+    }
+    .board-group.waiting .board-group-label { color: #ffd37a; }
+    .board-list {
+      list-style: none; margin: 0; padding: 0;
+      display: flex; flex-direction: column; gap: 0.45rem;
+    }
+    @media (min-width: 900px) {
+      .board-group.doing .board-list { display: grid; grid-template-columns: 1fr 1fr; gap: 0.45rem; }
+    }
+    .board-item {
+      margin: 0;
+      padding: 0.55rem 0.8rem;
+      border: 1px solid var(--line);
+      border-radius: 0.65rem;
+      background: rgba(255,255,255,0.03);
+    }
+    .board-item-title {
+      margin: 0;
+      font-size: clamp(1.15rem, 3.1vw, 1.7rem);
+      font-weight: 600;
+      line-height: 1.2;
+      letter-spacing: -0.02em;
+    }
+    .board-item-meta {
+      margin: 0.2rem 0 0;
+      font-size: clamp(0.792rem, 1.85vw, 0.968rem);
+      color: var(--muted);
+    }
+    .board-more, .board-rest, #board-empty {
+      margin: 0.35rem 0 0;
+      font-size: clamp(0.836rem, 2vw, 1.05rem);
+      color: var(--muted);
+    }
+    #board-empty[hidden], .board-group[hidden], .board-more[hidden], .board-rest[hidden], .board-updated:empty { display: none; }
+
+    .fleet-head, #done-panel, #fleet-panel, #research-section, #details-label, #details-rail { display: none !important; }
     footer { margin-top: 2.25rem; font-size: 0.704rem; color: var(--muted); }
   </style>
 </head>
 <body>
   <!-- ${GLASS_UI_VER} -->
   <header>
-    <div class="brand">Drivr · Cabin</div>
+    <div class="brand">Drivr · Notes</div>
     <div class="header-meta">
       <span class="glass-mode" id="glass-mode">Glass idle</span>
       <div class="status" id="status"><span class="live-dot" aria-hidden="true"></span><span id="status-text">Connecting</span></div>
     </div>
   </header>
+
+  <section id="board-section" aria-label="Task board" aria-live="polite">
+    <p class="section-label">Task board</p>
+    <p class="board-updated" id="board-updated"></p>
+    <p id="board-empty" hidden>No open tasks.</p>
+    <div class="board-group waiting" id="board-waiting" hidden>
+      <p class="board-group-label">Waiting on Bud</p>
+      <ul class="board-list" id="board-waiting-list"></ul>
+    </div>
+    <div class="board-group doing" id="board-doing" hidden>
+      <p class="board-group-label">In progress</p>
+      <ul class="board-list" id="board-doing-list"></ul>
+      <p class="board-more" id="board-doing-more" hidden></p>
+    </div>
+    <p class="board-rest" id="board-rest" hidden></p>
+  </section>
 
   <section id="capture-section" aria-label="Capture mirror">
     <div class="capture-head">
@@ -785,15 +1032,17 @@ export function renderPage(): string {
     <p class="empty" id="empty">No bots tracked yet.</p>
   </div>
 
-  <p class="section-label below" id="details-label" hidden>Live activity · cabin Grok</p>
-  <ul id="details-rail" aria-label="Live activity stream for cabin Grok" hidden></ul>
+  <p class="section-label below" id="details-label" hidden>Activity</p>
+  <ul id="details-rail" aria-label="Stored activity" hidden></ul>
 
-  <footer>Drivr glass. Tap-with-voice capture + fleet pulse. Open URL is always /s/&lt;session&gt; (bare host does not redirect). No secrets. America/Denver times. <span class="ver">${GLASS_UI_VER}</span></footer>
+  <footer>Drivr notes and task board. Parked display only — do not tap this screen while driving. Connected means this browser is attached. It does not make in-car Grok aware. Open URL is /s/&lt;session&gt;. No secrets in the URL. <span class="ver">${GLASS_UI_VER}</span></footer>
 
   <script>
   (function () {
     var GLASS_UI_VER = "${GLASS_UI_VER}";
     var traces = [];
+    var boardTasks = [];
+    var boardUpdatedAt = "";
     var botsEl = document.getElementById("bots");
     var emptyEl = document.getElementById("empty");
     var statusEl = document.getElementById("status");
@@ -817,7 +1066,7 @@ export function renderPage(): string {
     var doneCountEl = document.getElementById("done-count");
     var selectedCaptureKey = null;
     var selectedCaptureShell = null;
-    var captureShellExpandedBy = { todo: false, idea: false, note: false };
+    var captureShellExpandedBy = { todo: true, idea: true, note: true };
     var glassSessionId = (function () {
       var parts = String(location.pathname || "").split("/");
       for (var gi = 0; gi < parts.length - 1; gi++) {
@@ -847,6 +1096,110 @@ export function renderPage(): string {
       "#7dffa3", "#7ec8ff", "#ffb86b", "#d4a1ff",
       "#ff8fab", "#9ae66e", "#6ee7e0", "#ffd166"
     ];
+
+
+    var boardWaitingList = document.getElementById("board-waiting-list");
+    var boardDoingList = document.getElementById("board-doing-list");
+    var BOARD_DOING_MAX = 6;
+
+    function applyBoard(data) {
+      if (!data || !Array.isArray(data.tasks)) return;
+      boardTasks = data.tasks;
+      boardUpdatedAt = data.updatedAt ? String(data.updatedAt) : "";
+      renderBoard();
+    }
+
+    function boardMeta(t) {
+      var parts = [];
+      if (t && t.bot) parts.push(t.bot);
+      if (t && t.area) parts.push(t.area);
+      if (t && t.date) parts.push(t.date);
+      return parts.join(" · ");
+    }
+
+    function boardItemHtml(t) {
+      var meta = boardMeta(t);
+      return "<li class=\"board-item\"><p class=\"board-item-title\">" + esc(t && t.title ? t.title : "") + "</p>" +
+        (meta ? "<p class=\"board-item-meta\">" + esc(meta) + "</p>" : "") + "</li>";
+    }
+
+    function renderBoard() {
+      var waiting = [];
+      var doing = [];
+      var todo = 0;
+      var waitingRichard = 0;
+      boardTasks.forEach(function (t) {
+        if (!t) return;
+        if (t.column === "waiting") waiting.push(t);
+        else if (t.column === "doing") doing.push(t);
+        else if (t.column === "todo") todo += 1;
+        else if (t.column === "waiting_richard") waitingRichard += 1;
+      });
+      var emptyEl = document.getElementById("board-empty");
+      var waitingWrap = document.getElementById("board-waiting");
+      var doingWrap = document.getElementById("board-doing");
+      var moreEl = document.getElementById("board-doing-more");
+      var restEl = document.getElementById("board-rest");
+      var updatedEl = document.getElementById("board-updated");
+      if (updatedEl) {
+        if (boardUpdatedAt) {
+          try {
+            updatedEl.textContent = "Updated " + new Date(boardUpdatedAt).toLocaleString("en-US", {
+              timeZone: "America/Chicago", month: "short", day: "numeric", hour: "numeric", minute: "2-digit"
+            });
+          } catch (e) { updatedEl.textContent = ""; }
+        } else {
+          updatedEl.textContent = "";
+        }
+      }
+      var hasOpen = waiting.length || doing.length || todo || waitingRichard;
+      if (!hasOpen) {
+        if (emptyEl) emptyEl.hidden = false;
+        if (waitingWrap) waitingWrap.hidden = true;
+        if (doingWrap) doingWrap.hidden = true;
+        if (restEl) { restEl.hidden = true; restEl.textContent = ""; }
+        if (boardWaitingList) boardWaitingList.innerHTML = "";
+        if (boardDoingList) boardDoingList.innerHTML = "";
+        return;
+      }
+      if (emptyEl) emptyEl.hidden = true;
+      if (waitingWrap) waitingWrap.hidden = waiting.length === 0;
+      if (boardWaitingList) boardWaitingList.innerHTML = waiting.map(boardItemHtml).join("");
+      if (doingWrap) doingWrap.hidden = doing.length === 0;
+      var shown = doing.slice(0, BOARD_DOING_MAX);
+      if (boardDoingList) boardDoingList.innerHTML = shown.map(boardItemHtml).join("");
+      if (moreEl) {
+        if (doing.length > BOARD_DOING_MAX) {
+          moreEl.hidden = false;
+          moreEl.textContent = "+" + (doing.length - BOARD_DOING_MAX) + " more in progress";
+        } else {
+          moreEl.hidden = true;
+          moreEl.textContent = "";
+        }
+      }
+      if (restEl) {
+        var bits = [];
+        if (todo) bits.push(todo === 1 ? "1 to do" : todo + " to do");
+        if (waitingRichard) bits.push(waitingRichard === 1 ? "1 waiting on Richard" : waitingRichard + " waiting on Richard");
+        if (bits.length) {
+          restEl.hidden = false;
+          restEl.textContent = "Also " + bits.join(" · ");
+        } else {
+          restEl.hidden = true;
+          restEl.textContent = "";
+        }
+      }
+    }
+
+    function pullTasks() {
+      fetch(glassApi("/tasks"), { cache: "no-store", credentials: "same-origin" })
+        .then(function (r) {
+          if (!r.ok) throw new Error("tasks " + r.status);
+          return r.json();
+        })
+        .then(applyBoard)
+        .catch(function () { /* notes still work if the board cannot be read */ });
+    }
 
     function esc(s) {
       return String(s == null ? "" : s)
@@ -1142,7 +1495,7 @@ export function renderPage(): string {
             : '<p class="cap-dense-body">' + esc(clipDense(body, 280)) + "</p>";
         }
         if (selected) {
-          var deepRaw = String(it.detail || "").trim() || "Say this to in-car Grok to act — context lives on the glass so Grok need not ask.";
+          var deepRaw = String(it.detail || "").trim() || "Stored on this glass. In-car Grok is not automatically aware of it.";
           fullDetail =
             '<p class="cap-detail">' + linkifyHtml(deepRaw) + "</p>" +
             relatedRefsHtml(it, items);
@@ -1235,7 +1588,7 @@ export function renderPage(): string {
       if (!totalOpen) {
         captureEmpty.hidden = false;
         captureCount.hidden = true;
-        captureShellExpandedBy = { todo: false, idea: false, note: false };
+        captureShellExpandedBy = { todo: true, idea: true, note: true };
         selectedCaptureKey = null;
         selectedCaptureShell = null;
       } else {
@@ -2495,7 +2848,7 @@ export function renderPage(): string {
         })
         .then(function (data) {
           if (applyServerPayload(data)) return;
-          setStatus("Live", "live");
+          setStatus("Connected", "live");
           if (thenConnect) connect();
         })
         .catch(function (err) {
@@ -2505,7 +2858,24 @@ export function renderPage(): string {
         });
     }
 
+    function sseIsOpen() {
+      try { return !!(es && es.readyState === 1); } catch (e) { return false; }
+    }
+
+    var sseWanted = true;
+
+    function disconnect() {
+      sseWanted = false;
+      if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+      if (es) {
+        try { es.close(); } catch (e) {}
+        es = null;
+      }
+    }
+
     function connect() {
+      sseWanted = true;
+      try { if (document.visibilityState === "hidden") return; } catch (e) {}
       if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
       if (es) {
         try { es.close(); } catch (e) {}
@@ -2523,21 +2893,30 @@ export function renderPage(): string {
         try {
           var data = JSON.parse(ev.data);
           if (applyServerPayload(data)) return;
-          setStatus("Live", "live");
+          setStatus("Connected", "live");
         } catch (e) {}
       });
       es.addEventListener("trace", function (ev) {
         try {
           upsert(JSON.parse(ev.data));
-          setStatus("Live", "live");
+          setStatus("Connected", "live");
         } catch (e) {}
       });
+      es.addEventListener("tasks", function (ev) {
+        try { applyBoard(JSON.parse(ev.data)); } catch (e) {}
+      });
       es.onerror = function () {
+        var hidden = false;
+        try { hidden = document.visibilityState === "hidden" || !sseWanted; } catch (e) {}
+        if (hidden) {
+          disconnect();
+          return;
+        }
         setStatus("Reconnecting", "err");
         try { if (es) es.close(); } catch (e) {}
         es = null;
-        // Pull list immediately — Tesla WebViews often drop SSE without delivering the missed traces.
         pullList(false);
+        pullTasks();
         if (retryTimer) clearTimeout(retryTimer);
         retryTimer = setTimeout(connect, 2500);
       };
@@ -2546,28 +2925,39 @@ export function renderPage(): string {
     function bootstrap() {
       setStatus("Connecting", "");
       render();
+      renderBoard();
       pullList(true);
+      pullTasks();
     }
 
     bootstrap();
-    // Content poll: UI-version auto-reload alone does NOT refresh todos when SSE dies silently.
+    // SSE is the live path. Poll /list and /tasks only about every 60s, and only
+    // while the page is visible and EventSource is down. Closing SSE when hidden
+    // lets the Durable Object hibernate and saves Free-plan duration.
     setInterval(function () {
       render();
-      pullList(false);
-      // If EventSource looks dead, force reconnect.
-      try {
-        if (!es || es.readyState === 2) connect();
-      } catch (e) {}
-    }, 5000);
+      var hidden = false;
+      try { hidden = document.visibilityState === "hidden"; } catch (e) {}
+      if (hidden) return;
+      if (!sseIsOpen()) {
+        pullList(false);
+        pullTasks();
+        try { if (!es || es.readyState === 2) connect(); } catch (e) {}
+      }
+    }, 60000);
     document.addEventListener("visibilitychange", function () {
       if (document.visibilityState === "visible") {
         pullList(false);
-        try { if (!es || es.readyState !== 1) connect(); } catch (e) {}
+        pullTasks();
+        connect();
+      } else {
+        disconnect();
       }
     });
     window.addEventListener("pageshow", function () {
       pullList(false);
-      try { if (!es || es.readyState !== 1) connect(); } catch (e) {}
+      pullTasks();
+      connect();
     });
   })();
   </script>

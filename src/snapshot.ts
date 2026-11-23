@@ -89,7 +89,7 @@ function formatConstitution(rules: ConstitutionRule[]): string {
   return `## Constitution (DRIVER MODE · ${rules.length} rules)\n${blocks.join("\n\n")}\n`;
 }
 
-/** Plain text / markdown-ish dump for browse_page and cabin Grok. */
+/** Authenticated plain-text pull. Not a live feed for in-car Grok. */
 export function formatSnapshotText(
   traces: SnapshotTrace[],
   constitutionRules: ConstitutionRule[],
@@ -102,6 +102,7 @@ export function formatSnapshotText(
     "# Drivr cabin glass snapshot",
     ui ? `ui: ${ui}` : null,
     `generated: ${generatedAt}`,
+    "read: authenticated pull only. This file does not make in-car Grok aware.",
     `traces: ${traces.length} (capture ${groups.capture.length}, research ${groups.research.length}, fleet ${groups.fleet.length})`,
     "",
   ]
@@ -112,12 +113,42 @@ export function formatSnapshotText(
     header +
     formatConstitution(constitutionRules) +
     "\n" +
-    section("Capture (todos / ideas / notes)", groups.capture) +
+    formatNestedKind("To-dos", traces, "todo") +
+    "\n" +
+    formatNestedKind("Ideas", traces, "idea") +
+    "\n" +
+    formatNestedKind("Notes", traces, "note") +
     "\n" +
     section("Research", groups.research) +
     "\n" +
     section("Fleet (live bot activity)", groups.fleet)
   );
+}
+
+function isDrivr(t: SnapshotTrace): boolean {
+  return String(t.bot || "").toLowerCase() === "drivr";
+}
+
+function formatBullet(t: SnapshotTrace, depth: number): string {
+  const pad = "  ".repeat(depth);
+  const status = t.status ? ` (${t.status})` : "";
+  const lines = [`${pad}- ${t.summary}${status}`];
+  const body = bodyOf(t);
+  if (body) {
+    for (const line of body.split("\n")) lines.push(`${pad}  ${line}`);
+  }
+  return lines.join("\n");
+}
+
+/** Newest item is the face bullet. Older items of the same kind nest under it. */
+function formatNestedKind(title: string, traces: SnapshotTrace[], kind: "todo" | "idea" | "note"): string {
+  const items = traces.filter((t) => isDrivr(t) && String(t.kind || "").toLowerCase() === kind);
+  const sorted = [...items].sort(sortNewestFirst);
+  if (sorted.length === 0) return `## ${title}\n(none)\n`;
+  const [face, ...older] = sorted;
+  const lines = [`## ${title}`, formatBullet(face, 0)];
+  for (const item of older) lines.push(formatBullet(item, 1));
+  return lines.join("\n") + "\n";
 }
 
 export type SnapshotJson = {

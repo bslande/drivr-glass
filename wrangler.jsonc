@@ -12,6 +12,14 @@
     "logs": {
       "enabled": true,
       "head_sampling_rate": 1
+    },
+    // Header values are not trace attributes. URLs and query strings are.
+    // Never put the read/write token in a URL. Free-plan ingestion stops at the
+    // daily allowance instead of billing (Observability pricing from 2026-12-01).
+    "traces": {
+      "enabled": true,
+      // 10% — 100% sampling plus frequent polls can chew the Free 200k log/trace events/day cap.
+      "head_sampling_rate": 0.1
     }
   },
   "secrets": {
