@@ -220,8 +220,115 @@ describe("task board store", () => {
     expect(html).toContain('glassApi("/tasks")');
     expect(html).toContain("Waiting on Bud");
     expect(html).toContain("Parked display only");
-    expect(html).toContain("v-task-board-1");
+    expect(html).toContain("v-task-board-2");
     expect(html).not.toContain(token());
     expect(html).toContain('id="capture-section"');
+    expect(html).toContain("60000");
+    expect(html).toContain("disconnect");
+    expect(html).not.toContain("5000");
+  });
+
+  it("upserts a task with PATCH, is idempotent, and rejects cookie writes", async () => {
+    const cookie = await pairedReadCookie();
+    const viaCookie = await call(sessionUrl("/tasks/parked-test-item"), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        source: "tests",
+        idempotencyKey: "key-1",
+        title: "Parked test item",
+        bot: "Drivr",
+        column: "todo",
+      }),
+    });
+    expect(viaCookie.status).toBe(401);
+
+    const unauth = await call(sessionUrl("/tasks/parked-test-item"), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        source: "tests",
+        idempotencyKey: "key-1",
+        title: "Parked test item",
+        bot: "Drivr",
+        column: "todo",
+      }),
+    });
+    expect(unauth.status).toBe(401);
+
+    const bare = await call("http://example.com/tasks/parked-test-item", {
+      method: "PATCH",
+      headers: bearer({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        source: "tests",
+        idempotencyKey: "key-1",
+        title: "Parked test item",
+        bot: "Drivr",
+        column: "todo",
+      }),
+    });
+    expect(bare.status).toBe(404);
+
+    const created = await call(sessionUrl("/tasks/parked-test-item"), {
+      method: "PATCH",
+      headers: bearer({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        source: "tests",
+        idempotencyKey: "key-1",
+        title: "Parked test item",
+        bot: "Drivr",
+        area: "Home/Tesla",
+        column: "todo",
+      }),
+    });
+    expect(created.status).toBe(200);
+    const createdBody = await created.json() as { ok: boolean; created: boolean; idempotent: boolean; task: { title: string; source?: string } };
+    expect(createdBody.ok).toBe(true);
+    expect(createdBody.created).toBe(true);
+    expect(createdBody.idempotent).toBe(false);
+    expect(createdBody.task.title).toBe("Parked test item");
+    expect(createdBody.task.source).toBe("tests");
+
+    const replay = await call(sessionUrl("/tasks/parked-test-item"), {
+      method: "PATCH",
+      headers: bearer({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        source: "tests",
+        idempotencyKey: "key-1",
+        title: "This should not apply",
+        bot: "Drivr",
+        column: "doing",
+      }),
+    });
+    expect(replay.status).toBe(200);
+    const replayBody = await replay.json() as { idempotent: boolean; created: boolean; task: { title: string; column: string } };
+    expect(replayBody.idempotent).toBe(true);
+    expect(replayBody.created).toBe(false);
+    expect(replayBody.task.title).toBe("Parked test item");
+    expect(replayBody.task.column).toBe("todo");
+
+    const updated = await call(sessionUrl("/tasks/parked-test-item"), {
+      method: "PATCH",
+      headers: bearer({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        source: "tests",
+        idempotencyKey: "key-2",
+        column: "doing",
+      }),
+    });
+    expect(updated.status).toBe(200);
+    const updatedBody = await updated.json() as { created: boolean; idempotent: boolean; task: { column: string; title: string } };
+    expect(updatedBody.created).toBe(false);
+    expect(updatedBody.idempotent).toBe(false);
+    expect(updatedBody.task.column).toBe("doing");
+    expect(updatedBody.task.title).toBe("Parked test item");
+
+    const listed = await call(sessionUrl("/tasks"), { headers: bearer() });
+    const board = await listed.json() as { tasks: Array<{ id: string; column: string }> };
+    const hit = board.tasks.find((item) => item.id === "parked-test-item");
+    expect(hit?.column).toBe("doing");
+
+    const notes = await call(sessionUrl("/list"), { headers: bearer() });
+    expect(notes.status).toBe(200);
   });
 });

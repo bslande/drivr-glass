@@ -17,6 +17,7 @@ export type BoardTask = {
   area?: string;
   date?: string;
   column: BoardColumn;
+  source?: string;
 };
 
 export type TaskBoard = {
@@ -24,12 +25,14 @@ export type TaskBoard = {
   tasks: BoardTask[];
 };
 
-const MAX_TASKS = 80;
+export const MAX_TASKS = 80;
 const MAX_ID = 64;
 const MAX_TITLE = 200;
 const MAX_BOT = 40;
 const MAX_AREA = 40;
 const MAX_DATE = 160;
+const MAX_SOURCE = 40;
+const MAX_IDEMPOTENCY = 80;
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const COLUMN_SET = new Set<string>(BOARD_COLUMNS);
 
@@ -88,6 +91,9 @@ export function sanitizeTaskBoard(raw: unknown): BoardSanitizeResult {
       return { ok: false, error: "column must be todo, doing, waiting, waiting_richard, or done" };
     }
 
+    const sourceRes = cleanLine("source", row.source, MAX_SOURCE, false);
+    if (!sourceRes.ok) return sourceRes;
+
     const task: BoardTask = {
       id,
       title: titleRes.text!,
@@ -96,6 +102,7 @@ export function sanitizeTaskBoard(raw: unknown): BoardSanitizeResult {
     };
     if (areaRes.text) task.area = areaRes.text;
     if (dateRes.text) task.date = dateRes.text;
+    if (sourceRes.text) task.source = sourceRes.text;
     tasks.push(task);
   }
 
@@ -108,4 +115,68 @@ export function sanitizeTaskBoard(raw: unknown): BoardSanitizeResult {
   }
 
   return { ok: true, board: { updatedAt, tasks } };
+}
+
+export type TaskPatch = {
+  id: string;
+  source: string;
+  idempotencyKey: string;
+  title?: string;
+  bot?: string;
+  area?: string;
+  date?: string;
+  column?: BoardColumn;
+};
+
+export type PatchSanitizeResult =
+  | { ok: true; patch: TaskPatch }
+  | { ok: false; error: string };
+
+/** Per-item upsert body. source and idempotencyKey are required. */
+export function sanitizeTaskPatch(taskId: string, raw: unknown): PatchSanitizeResult {
+  const idRes = cleanLine("id", taskId, MAX_ID, true);
+  if (!idRes.ok) return idRes;
+  const id = idRes.text!;
+  if (!ID_RE.test(id)) return { ok: false, error: "id must be letters, numbers, underscores, or hyphens" };
+
+  if (raw == null || typeof raw !== "object") {
+    return { ok: false, error: "body must be a JSON object" };
+  }
+  const row = raw as Record<string, unknown>;
+  const sourceRes = cleanLine("source", row.source, MAX_SOURCE, true);
+  if (!sourceRes.ok) return sourceRes;
+  const keyRes = cleanLine("idempotencyKey", row.idempotencyKey, MAX_IDEMPOTENCY, true);
+  if (!keyRes.ok) return keyRes;
+  if (!ID_RE.test(keyRes.text!)) {
+    return { ok: false, error: "idempotencyKey must be letters, numbers, underscores, or hyphens" };
+  }
+
+  const titleRes = cleanLine("title", row.title, MAX_TITLE, false);
+  if (!titleRes.ok) return titleRes;
+  const botRes = cleanLine("bot", row.bot, MAX_BOT, false);
+  if (!botRes.ok) return botRes;
+  const areaRes = cleanLine("area", row.area, MAX_AREA, false);
+  if (!areaRes.ok) return areaRes;
+  const dateRes = cleanLine("date", row.date, MAX_DATE, false);
+  if (!dateRes.ok) return dateRes;
+
+  let column: BoardColumn | undefined;
+  if (row.column != null && row.column !== "") {
+    if (typeof row.column !== "string" || !COLUMN_SET.has(row.column)) {
+      return { ok: false, error: "column must be todo, doing, waiting, waiting_richard, or done" };
+    }
+    column = row.column as BoardColumn;
+  }
+
+  const patch: TaskPatch = {
+    id,
+    source: sourceRes.text!,
+    idempotencyKey: keyRes.text!,
+  };
+  if (titleRes.text) patch.title = titleRes.text;
+  if (botRes.text) patch.bot = botRes.text;
+  if (areaRes.text) patch.area = areaRes.text;
+  if (dateRes.text) patch.date = dateRes.text;
+  if (column) patch.column = column;
+  return { ok: true, patch };
 }

@@ -1,6 +1,6 @@
 import { TraceHub } from "./trace-hub";
 import { sanitizeTrace, type RawTrace, type Trace } from "./sanitize";
-import { sanitizeTaskBoard } from "./board-tasks";
+import { sanitizeTaskBoard, sanitizeTaskPatch } from "./board-tasks";
 import { renderLoginGate, renderPage, renderPairMessage, renderPairPending } from "./page";
 import { GLASS_UI_VER } from "./ui-ver";
 import { CONSTITUTION_RULES } from "./constitution";
@@ -445,6 +445,35 @@ export default {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(result.board),
+        }),
+      );
+    }
+
+    const patchMatch = /^\/tasks\/([^/]+)$/.exec(path);
+    if (patchMatch && request.method === "PATCH") {
+      if (!viaSession) {
+        return new Response("Not found", { status: 404, headers: { "Cache-Control": "no-store" } });
+      }
+      if (!(await authorizePush(request, env))) {
+        console.log(JSON.stringify({ message: "tasks_patch_unauthorized" }));
+        return Response.json({ ok: false, error: "unauthorized" }, { status: 401 });
+      }
+      let raw: unknown;
+      try {
+        raw = await request.json();
+      } catch {
+        return Response.json({ ok: false, error: "invalid JSON" }, { status: 400 });
+      }
+      const result = sanitizeTaskPatch(decodeURIComponent(patchMatch[1]), raw);
+      if (!result.ok) {
+        console.log(JSON.stringify({ message: "tasks_patch_rejected", error: result.error }));
+        return Response.json({ ok: false, error: result.error }, { status: 400 });
+      }
+      return hubStub(env).fetch(
+        new Request(new URL("/tasks/" + encodeURIComponent(result.patch.id), request.url), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(result.patch),
         }),
       );
     }

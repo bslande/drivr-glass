@@ -3,12 +3,11 @@
 
 Runs on Bud's Mac mini (launchd). When TeslaMate MQTT reports a drive start
 (state=driving or shift_state D/R), or when the parked-test topic
-drivr/board/refresh is published, this script:
+drivr/board/refresh is published, this script POSTs /tasks/refresh so an
+open glass page gets an SSE "tasks" event.
 
-  1. Optionally PUTs ~/drivr-glass/task-board.json if that file's updatedAt
-     is newer than the Worker board (avoids overwriting a newer Worker store).
-  2. POSTs /tasks/refresh so open glass pages get an SSE "tasks" event.
-     The glass also polls GET /tasks while it is open.
+This job never PUTs task-board.json. Full board replace is a single-owner
+path (scripts/sync-task-board.sh). Bots should PATCH /s/<id>/tasks/<id>.
 
 The bearer token and glass session URL are read from mode-600 sibling files
 PUSH_TOKEN.local and GLASS_URL.local. They are never printed. MQTT stays on
@@ -27,21 +26,23 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
 DIR = Path(__file__).resolve().parent
 TOKEN_FILE = DIR / "PUSH_TOKEN.local"
 URL_FILE = DIR / "GLASS_URL.local"
-BOARD_FILE = DIR / "task-board.json"
 
 MQTT_CONTAINER = os.environ.get("DRIVR_MQTT_CONTAINER", "teslamate-mosquitto-1")
 STATE_TOPIC = "teslamate/cars/1/state"
 SHIFT_TOPIC = "teslamate/cars/1/shift_state"
 TEST_TOPIC = "drivr/board/refresh"
 COOLDOWN_SEC = 60
+BACKOFF_START_SEC = 2
+BACKOFF_MAX_SEC = 60
 DOCKER = os.environ.get("DOCKER", "/usr/local/bin/docker")
+CURL = os.environ.get("CURL", "/usr/bin/curl")
 
 
 def log(msg: str) -> None:
@@ -64,21 +65,8 @@ def load_base_url() -> str:
     url = URL_FILE.read_text().strip().rstrip("/")
     if not url.startswith("https://"):
         raise SystemExit("GLASS_URL.local is not an https session URL")
-    # Do not log or return anything beyond the in-memory URL.
     return url
 
-
-def parse_iso(value: str) -> Optional[datetime]:
-    try:
-        raw = value.strip()
-        if raw.endswith("Z"):
-            raw = raw[:-1] + "+00:00"
-        return datetime.fromisoformat(raw)
-    except (ValueError, TypeError):
-        return None
-
-
-CURL = os.environ.get("CURL", "/usr/bin/curl")
 
 def request_json(
     method: str,
@@ -88,7 +76,6 @@ def request_json(
     timeout: int = 20,
 ) -> tuple[int, Any]:
     """Call the Worker with curl (macOS SecureTransport). Token stays off argv."""
-    # python.org's urllib on this Mac lacks a CA bundle (CERTIFICATE_VERIFY_FAILED).
     tmp = Path(tempfile.mkdtemp(prefix="drivr-board-http-"))
     try:
         os.chmod(tmp, 0o700)
@@ -110,7 +97,7 @@ def request_json(
             f'url = "{url}"',
             "silent",
             "show-error",
-            f"connect-timeout = 10",
+            "connect-timeout = 10",
             f"max-time = {timeout}",
             f'request = "{method}"',
             f'header = "@{header_file}"',
@@ -151,61 +138,81 @@ def request_json(
             pass
 
 
-def maybe_put_local_board(base: str, token: str) -> None:
-    if not BOARD_FILE.is_file():
-        log("no local task-board.json; leaving Worker board unchanged")
-        return
-    try:
-        local = json.loads(BOARD_FILE.read_text())
-    except (OSError, json.JSONDecodeError):
-        log("local task-board.json unreadable; skipping PUT")
-        return
-    if not isinstance(local, dict) or not isinstance(local.get("tasks"), list):
-        log("local task-board.json is not a board; skipping PUT")
-        return
-    local_at = parse_iso(str(local.get("updatedAt") or ""))
-    code, remote = request_json("GET", base + "/tasks", token)
-    if code != 200 or not isinstance(remote, dict):
-        log(f"GET /tasks failed ({code}); skipping PUT")
-        return
-    remote_at = parse_iso(str(remote.get("updatedAt") or ""))
-    if local_at is None:
-        log("local board has no updatedAt; skipping PUT")
-        return
-    if remote_at is not None and local_at <= remote_at:
-        log("local board is not newer than Worker; skipping PUT")
-        return
-    if "updatedAt" not in local:
-        local = dict(local)
-        local["updatedAt"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    payload = json.dumps(local, separators=(",", ":")).encode("utf-8")
-    put_code, put_body = request_json("PUT", base + "/tasks", token, body=payload)
-    count = put_body.get("count") if isinstance(put_body, dict) else "?"
-    log(f"PUT /tasks -> HTTP {put_code} count={count}")
-
-
 def refresh(base: str, token: str) -> int:
-    maybe_put_local_board(base, token)
+    # Never PUT a local task-board.json from this job, stale or not.
     code, body = request_json("POST", base + "/tasks/refresh", token, body=b"{}")
     count = body.get("count") if isinstance(body, dict) else "?"
     log(f"POST /tasks/refresh -> HTTP {code} count={count}")
     return 0 if code == 200 else 1
 
 
-def is_drive_start(topic: str, payload: str, prev_state: str, prev_shift: str) -> bool:
+def in_gear(payload: str) -> bool:
+    return payload.strip() in ("D", "R")
+
+
+def not_in_gear(payload: str) -> bool:
+    p = payload.strip()
+    if p == "" or p.lower() in {"nil", "null", "none"}:
+        return True
+    return p.upper() == "P"
+
+
+class ListenerState:
+    """Persists across MQTT reconnects inside this process."""
+
+    def __init__(self) -> None:
+        self.prev_state: Optional[str] = None
+        self.prev_shift: Optional[str] = None
+        self.seeded_state = False
+        self.seeded_shift = False
+        self.last_fire = 0.0
+
+    def seed_state(self, payload: str) -> None:
+        self.prev_state = payload
+        self.seeded_state = True
+
+    def seed_shift(self, payload: str) -> None:
+        self.prev_shift = payload
+        self.seeded_shift = True
+
+
+def parse_topic_line(line: str) -> tuple[str, str]:
+    line = line.strip()
+    if " " not in line:
+        return line, ""
+    topic, payload = line.split(" ", 1)
+    return topic, payload
+
+
+def rising_drive_start(topic: str, payload: str, state: ListenerState) -> str:
+    """Return a reason to fire, or empty if this is only a seed or not a start.
+
+    Fires on whichever rising edge comes first: state=driving or shift D/R.
+    First message for each topic seeds previous values and does not fire.
+    """
     if topic == TEST_TOPIC:
-        return True
-    if topic == STATE_TOPIC and payload == "driving" and prev_state != "driving":
-        return True
-    if topic == SHIFT_TOPIC and payload in ("D", "R") and prev_shift not in ("D", "R"):
-        return True
-    return False
+        return "test topic"
+    if topic == STATE_TOPIC:
+        if not state.seeded_state:
+            state.seed_state(payload)
+            return ""
+        started = payload.strip() == "driving" and state.prev_state != "driving"
+        state.prev_state = payload
+        return "drive start (state)" if started else ""
+    if topic == SHIFT_TOPIC:
+        if not state.seeded_shift:
+            state.seed_shift(payload)
+            return ""
+        started = in_gear(payload) and not in_gear(state.prev_shift or "")
+        # empty / nil / P are not in gear; already handled by in_gear().
+        _ = not_in_gear(payload)
+        state.prev_shift = payload
+        return "drive start (shift)" if started else ""
+    return ""
 
 
-def listen() -> int:
-    token = load_token()
-    base = load_base_url()
-    cmd = [
+def mosquitto_cmd(*extra: str) -> list[str]:
+    return [
         DOCKER,
         "exec",
         "-i",
@@ -218,11 +225,42 @@ def listen() -> int:
         "-t",
         TEST_TOPIC,
         "-v",
+        *extra,
     ]
-    log("subscribing to TeslaMate MQTT via docker exec (no host port publish)")
+
+
+def seed_from_retained(state: ListenerState) -> None:
+    """Read retained current values (no -R) to seed prev_* without firing."""
+    try:
+        proc = subprocess.run(
+            mosquitto_cmd("-W", "2"),
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError) as exc:
+        log(f"retained seed skipped ({type(exc).__name__})")
+        return
+    for raw in (proc.stdout or "").splitlines():
+        topic, payload = parse_topic_line(raw)
+        if topic == STATE_TOPIC and not state.seeded_state:
+            state.seed_state(payload)
+        elif topic == SHIFT_TOPIC and not state.seeded_shift:
+            state.seed_shift(payload)
+    bits = []
+    if state.seeded_state:
+        bits.append("state")
+    if state.seeded_shift:
+        bits.append("shift")
+    log("seeded previous values from retained MQTT: " + (", ".join(bits) if bits else "none"))
+
+
+def subscribe_live(state: ListenerState, base: str, token: str) -> int:
+    """Subscribe without retained leftovers (-R). Return process exit or 1."""
+    log("subscribing to TeslaMate MQTT via docker exec (-R, no host port publish)")
     try:
         proc = subprocess.Popen(
-            cmd,
+            mosquitto_cmd("-R"),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -231,37 +269,20 @@ def listen() -> int:
         log(f"docker exec failed to start: {exc}")
         return 1
 
-    prev_state = ""
-    prev_shift = ""
-    last_fire = 0.0
     assert proc.stdout is not None
     try:
         for line in proc.stdout:
-            line = line.strip()
-            if not line:
+            topic, payload = parse_topic_line(line)
+            if not topic:
                 continue
-            if " " not in line:
-                topic, payload = line, ""
-            else:
-                topic, payload = line.split(" ", 1)
-            if topic == STATE_TOPIC:
-                drive = is_drive_start(topic, payload, prev_state, prev_shift)
-                prev_state = payload
-            elif topic == SHIFT_TOPIC:
-                drive = is_drive_start(topic, payload, prev_state, prev_shift)
-                prev_shift = payload
-            elif topic == TEST_TOPIC:
-                drive = True
-            else:
+            reason = rising_drive_start(topic, payload, state)
+            if not reason:
                 continue
             now = time.time()
-            if not drive:
-                continue
-            if now - last_fire < COOLDOWN_SEC:
+            if now - state.last_fire < COOLDOWN_SEC:
                 log("drive-start or test poke ignored (cooldown)")
                 continue
-            last_fire = now
-            reason = "test topic" if topic == TEST_TOPIC else "drive start"
+            state.last_fire = now
             log(f"trigger: {reason}")
             refresh(base, token)
     finally:
@@ -271,21 +292,31 @@ def listen() -> int:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
-        err = ""
-        if proc.stderr is not None:
-            try:
-                err = proc.stderr.read().strip()
-            except Exception:
-                err = ""
-        if proc.returncode not in (0, None) and err:
-            # stderr from docker/mosquitto should not contain our token.
+        if proc.returncode not in (0, None):
             log(f"mosquitto_sub exited {proc.returncode}")
-    return 0
+    return proc.returncode if proc.returncode not in (0, None) else 1
+
+
+def listen() -> int:
+    token = load_token()
+    base = load_base_url()
+    state = ListenerState()
+    backoff = BACKOFF_START_SEC
+    while True:
+        started = time.time()
+        seed_from_retained(state)
+        subscribe_live(state, base, token)
+        # Keep cooldown and prev_* across reconnects; only the socket is new.
+        if time.time() - started > 60:
+            backoff = BACKOFF_START_SEC
+        log(f"mqtt disconnected; reconnecting in {backoff}s (state preserved)")
+        time.sleep(backoff)
+        backoff = min(backoff * 2, BACKOFF_MAX_SEC)
 
 
 def main(argv: list[str]) -> int:
     if "--now" in argv:
-        log("parked test refresh (--now)")
+        log("parked test refresh (--now); no local PUT")
         return refresh(load_base_url(), load_token())
     return listen()
 

@@ -88,7 +88,8 @@ Give Drivr the **open URL only** (not the token). Drivr saves it in memory as `D
 | `GET` | `/s/<id>/events` | SSE stream when authorized (`text/event-stream`) |
 | `GET` | `/s/<id>/list` | JSON snapshot when authorized |
 | `GET` | `/s/<id>/tasks` | JSON task board when authorized (Bearer or paired read cookie) |
-| `PUT` | `/s/<id>/tasks` | Replace the task board (Bearer required; does not clear glass notes) |
+| `PUT` | `/s/<id>/tasks` | Full board replace (Bearer required; single-owner path, e.g. `scripts/sync-task-board.sh`; does not clear glass notes) |
+| `PATCH` | `/s/<id>/tasks/<taskId>` | Per-item upsert (Bearer required; `source` and `idempotencyKey` required) |
 | `POST` | `/s/<id>/tasks/refresh` | Broadcast the current board to open glass clients (Bearer required; no write) |
 
 Task-board design, drive-start refresh, and cost notes: [`ARCHITECTURE-task-board.md`](ARCHITECTURE-task-board.md). Listener source for the Mac mini: `scripts/macmini/`.

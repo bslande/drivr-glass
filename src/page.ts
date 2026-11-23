@@ -2858,7 +2858,24 @@ export function renderPage(): string {
         });
     }
 
+    function sseIsOpen() {
+      try { return !!(es && es.readyState === 1); } catch (e) { return false; }
+    }
+
+    var sseWanted = true;
+
+    function disconnect() {
+      sseWanted = false;
+      if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+      if (es) {
+        try { es.close(); } catch (e) {}
+        es = null;
+      }
+    }
+
     function connect() {
+      sseWanted = true;
+      try { if (document.visibilityState === "hidden") return; } catch (e) {}
       if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
       if (es) {
         try { es.close(); } catch (e) {}
@@ -2889,11 +2906,17 @@ export function renderPage(): string {
         try { applyBoard(JSON.parse(ev.data)); } catch (e) {}
       });
       es.onerror = function () {
+        var hidden = false;
+        try { hidden = document.visibilityState === "hidden" || !sseWanted; } catch (e) {}
+        if (hidden) {
+          disconnect();
+          return;
+        }
         setStatus("Reconnecting", "err");
         try { if (es) es.close(); } catch (e) {}
         es = null;
-        // Pull list immediately — Tesla WebViews often drop SSE without delivering the missed traces.
         pullList(false);
+        pullTasks();
         if (retryTimer) clearTimeout(retryTimer);
         retryTimer = setTimeout(connect, 2500);
       };
@@ -2908,27 +2931,33 @@ export function renderPage(): string {
     }
 
     bootstrap();
-    // Content poll: UI-version auto-reload alone does NOT refresh todos when SSE dies silently.
+    // SSE is the live path. Poll /list and /tasks only about every 60s, and only
+    // while the page is visible and EventSource is down. Closing SSE when hidden
+    // lets the Durable Object hibernate and saves Free-plan duration.
     setInterval(function () {
       render();
-      pullList(false);
-      pullTasks();
-      // If EventSource looks dead, force reconnect.
-      try {
-        if (!es || es.readyState === 2) connect();
-      } catch (e) {}
-    }, 5000);
+      var hidden = false;
+      try { hidden = document.visibilityState === "hidden"; } catch (e) {}
+      if (hidden) return;
+      if (!sseIsOpen()) {
+        pullList(false);
+        pullTasks();
+        try { if (!es || es.readyState === 2) connect(); } catch (e) {}
+      }
+    }, 60000);
     document.addEventListener("visibilitychange", function () {
       if (document.visibilityState === "visible") {
         pullList(false);
         pullTasks();
-        try { if (!es || es.readyState !== 1) connect(); } catch (e) {}
+        connect();
+      } else {
+        disconnect();
       }
     });
     window.addEventListener("pageshow", function () {
       pullList(false);
       pullTasks();
-      try { if (!es || es.readyState !== 1) connect(); } catch (e) {}
+      connect();
     });
   })();
   </script>

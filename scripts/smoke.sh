@@ -25,6 +25,10 @@ echo "== tasks/refresh without auth is rejected =="
 code="$(curl -sS -o "$TMP/unauth" -w '%{http_code}' -X POST -H "Content-Type: application/json" -d '{}' "$SESSION_BASE/tasks/refresh")"
 echo "POST <session>/tasks/refresh -> HTTP $code"; [[ "$code" == "401" ]]
 
+echo "== tasks PATCH without auth is rejected =="
+code="$(curl -sS -o "$TMP/unauth" -w '%{http_code}' -X PATCH -H "Content-Type: application/json" -d '{"source":"smoke","idempotencyKey":"smoke-1","title":"x","bot":"Drivr","column":"todo"}' "$SESSION_BASE/tasks/smoke-item")"
+echo "PATCH <session>/tasks/smoke-item -> HTTP $code"; [[ "$code" == "401" ]]
+
 echo "== open + snapshot with bearer =="
 for p in "" "/snapshot"; do
   code="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$SESSION_BASE$p")"
