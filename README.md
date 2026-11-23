@@ -87,12 +87,18 @@ Give Drivr the **open URL only** (not the token). Drivr saves it in memory as `D
 | `POST` | `/s/<id>/session` | **410.** A browser cannot submit the write token |
 | `GET` | `/s/<id>/events` | SSE stream when authorized (`text/event-stream`) |
 | `GET` | `/s/<id>/list` | JSON snapshot when authorized |
+| `GET` | `/s/<id>/tasks` | JSON task board when authorized (Bearer or paired read cookie) |
+| `PUT` | `/s/<id>/tasks` | Full board replace (Bearer required; single-owner path, e.g. `scripts/sync-task-board.sh`; does not clear glass notes) |
+| `PATCH` | `/s/<id>/tasks/<taskId>` | Per-item upsert (Bearer required; `source` and `idempotencyKey` required) |
+| `POST` | `/s/<id>/tasks/refresh` | Broadcast the current board to open glass clients (Bearer required; no write) |
+
+Task-board design, drive-start refresh, and cost notes: [`ARCHITECTURE-task-board.md`](ARCHITECTURE-task-board.md). Listener source for the Mac mini: `scripts/macmini/`.
 | `GET` | `/s/<id>/snapshot` | Plain text (default) or JSON (`?format=json`) when authorized |
 | `POST` | `/s/<id>/push` (or `/push`) | Bearer write. Cookie alone is not enough |
 | `POST` | `/s/<id>/clear` (or `/clear`) | Bearer wipe. Cookie alone is not enough. This is the only clear |
 | `GET` | `/health` | Plain `ok` |
 
-Bare `/events`, `/list`, `/snapshot` → 404. Wrong `/s/<id>` → 404. Missing or wrong auth on a real session → **401** and no note text. A credential in the query string → **400**. Refresh, SSE reconnect, and Durable Object eviction do not clear notes.
+Bare `/events`, `/list`, `/snapshot`, `/tasks` → 404. Wrong `/s/<id>` → 404. Missing or wrong auth on a real session → **401** and no note text. A credential in the query string → **400**. Refresh, SSE reconnect, and Durable Object eviction do not clear notes.
 
 Parked browser login does not use the write token. The owner taps **Pair this browser**, reads the request id and phrase on that screen, and tells Drivr those two lines. Drivr approves that exact pair with the bearer token from `PUSH_TOKEN.local` on the computer. Only the waiting browser receives the read cookie. The id and phrase are not a password. In-car direct fetch is unsupported. The page polls only during that wait, then stops.
 

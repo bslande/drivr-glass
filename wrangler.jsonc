@@ -18,7 +18,8 @@
     // daily allowance instead of billing (Observability pricing from 2026-12-01).
     "traces": {
       "enabled": true,
-      "head_sampling_rate": 1
+      // 10% — 100% sampling plus frequent polls can chew the Free 200k log/trace events/day cap.
+      "head_sampling_rate": 0.1
     }
   },
   "secrets": {

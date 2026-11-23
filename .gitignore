@@ -10,3 +10,8 @@ GLASS_URL.local
 .mode-on
 .DS_Store
 dist/
+
+__pycache__/
+*.pyc
+# Live board may contain personal items; commit only task-board.example.json
+scripts/task-board.json
