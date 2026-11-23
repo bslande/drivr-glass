@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Trace } from "./sanitize";
+import type { BoardTask, TaskBoard } from "./board-tasks";
 import { GLASS_UI_VER } from "./ui-ver";
 import { PAIR_MAX_PENDING, PAIR_MAX_POLLS } from "./pair";
 
@@ -67,6 +68,22 @@ export class TraceHub extends DurableObject {
         created INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_pairings_verifier ON pairings(verifier_hash);
+    `);
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS board_tasks (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        bot TEXT NOT NULL,
+        area TEXT,
+        date_note TEXT,
+        col TEXT NOT NULL,
+        sort_index INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS board_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
     `);
     this.schemaReady = true;
   }
@@ -269,6 +286,55 @@ export class TraceHub extends DurableObject {
     return { state: "pending", requestId: row.id, phrase: row.phrase };
   }
 
+
+  private listBoard(): TaskBoard {
+    this.ensureSchema();
+    const meta = this.ctx.storage.sql
+      .exec<{ value: string }>(`SELECT value FROM board_meta WHERE key = 'updated_at'`)
+      .toArray();
+    const rows = this.ctx.storage.sql
+      .exec<{
+        id: string;
+        title: string;
+        bot: string;
+        area: string | null;
+        date_note: string | null;
+        col: string;
+      }>(
+        `SELECT id, title, bot, area, date_note, col FROM board_tasks ORDER BY sort_index ASC, id ASC`,
+      )
+      .toArray();
+    const tasks: BoardTask[] = rows.map((r) => {
+      const task: BoardTask = { id: r.id, title: r.title, bot: r.bot, column: r.col as BoardTask["column"] };
+      if (r.area) task.area = r.area;
+      if (r.date_note) task.date = r.date_note;
+      return task;
+    });
+    return { updatedAt: meta[0]?.value || new Date(0).toISOString(), tasks };
+  }
+
+  private replaceBoard(board: TaskBoard): void {
+    this.ensureSchema();
+    this.ctx.storage.sql.exec(`DELETE FROM board_tasks`);
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO board_meta (key, value) VALUES ('updated_at', ?)`,
+      board.updatedAt,
+    );
+    board.tasks.forEach((task, index) => {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO board_tasks (id, title, bot, area, date_note, col, sort_index, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        task.id,
+        task.title,
+        task.bot,
+        task.area ?? null,
+        task.date ?? null,
+        task.column,
+        index,
+        board.updatedAt,
+      );
+    });
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
@@ -304,6 +370,38 @@ export class TraceHub extends DurableObject {
       );
     }
 
+    if (path === "/tasks" && request.method === "GET") {
+      return Response.json(this.listBoard(), {
+        headers: { "Cache-Control": "no-store, no-cache, must-revalidate" },
+      });
+    }
+
+    if (path === "/tasks" && request.method === "PUT") {
+      let body: unknown;
+      try {
+        body = await request.json();
+      } catch {
+        return Response.json({ ok: false, error: "invalid JSON" }, { status: 400 });
+      }
+      // Sanitized by the Worker router before this stub is called.
+      const board = body as TaskBoard;
+      if (!board || !Array.isArray(board.tasks) || typeof board.updatedAt !== "string") {
+        return Response.json({ ok: false, error: "invalid board" }, { status: 400 });
+      }
+      this.replaceBoard(board);
+      await this.broadcast("tasks", this.listBoard());
+      return Response.json({ ok: true, updatedAt: board.updatedAt, count: board.tasks.length }, { status: 200 });
+    }
+
+    if (path === "/tasks/refresh" && request.method === "POST") {
+      const board = this.listBoard();
+      await this.broadcast("tasks", board);
+      return Response.json(
+        { ok: true, updatedAt: board.updatedAt, count: board.tasks.length, refreshed: true },
+        { status: 200 },
+      );
+    }
+
     return new Response("Not found", { status: 404 });
   }
 
@@ -323,6 +421,7 @@ export class TraceHub extends DurableObject {
         await writer.write(
           this.sseFrame("snapshot", { ui: GLASS_UI_VER, traces: this.listTraces() }),
         );
+        await writer.write(this.sseFrame("tasks", this.listBoard()));
         // One-shot readers (tests, and any authorized client that asks) stop after the snapshot.
         // The browser EventSource does not send this header, so it keeps the heartbeat.
         if (once) {

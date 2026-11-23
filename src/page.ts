@@ -917,6 +917,58 @@ export function renderPage(): string {
       letter-spacing: 0.04em; text-transform: uppercase;
     }
 
+
+    /* —— Task board (read-only, glanceable, parked display) —— */
+    #board-section { margin: 0 0 1.35rem; }
+    #board-section .section-label { margin-bottom: 0.3rem; }
+    .board-updated {
+      margin: 0 0 0.65rem;
+      font-size: clamp(0.748rem, 1.76vw, 0.88rem);
+      color: var(--muted);
+    }
+    .board-group { margin: 0 0 0.85rem; }
+    .board-group-label {
+      margin: 0 0 0.35rem;
+      font-size: clamp(0.88rem, 2.1vw, 1.12rem);
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--soft);
+    }
+    .board-group.waiting .board-group-label { color: #ffd37a; }
+    .board-list {
+      list-style: none; margin: 0; padding: 0;
+      display: flex; flex-direction: column; gap: 0.45rem;
+    }
+    @media (min-width: 900px) {
+      .board-group.doing .board-list { display: grid; grid-template-columns: 1fr 1fr; gap: 0.45rem; }
+    }
+    .board-item {
+      margin: 0;
+      padding: 0.55rem 0.8rem;
+      border: 1px solid var(--line);
+      border-radius: 0.65rem;
+      background: rgba(255,255,255,0.03);
+    }
+    .board-item-title {
+      margin: 0;
+      font-size: clamp(1.15rem, 3.1vw, 1.7rem);
+      font-weight: 600;
+      line-height: 1.2;
+      letter-spacing: -0.02em;
+    }
+    .board-item-meta {
+      margin: 0.2rem 0 0;
+      font-size: clamp(0.792rem, 1.85vw, 0.968rem);
+      color: var(--muted);
+    }
+    .board-more, .board-rest, #board-empty {
+      margin: 0.35rem 0 0;
+      font-size: clamp(0.836rem, 2vw, 1.05rem);
+      color: var(--muted);
+    }
+    #board-empty[hidden], .board-group[hidden], .board-more[hidden], .board-rest[hidden], .board-updated:empty { display: none; }
+
     .fleet-head, #done-panel, #fleet-panel, #research-section, #details-label, #details-rail { display: none !important; }
     footer { margin-top: 2.25rem; font-size: 0.704rem; color: var(--muted); }
   </style>
@@ -930,6 +982,22 @@ export function renderPage(): string {
       <div class="status" id="status"><span class="live-dot" aria-hidden="true"></span><span id="status-text">Connecting</span></div>
     </div>
   </header>
+
+  <section id="board-section" aria-label="Task board" aria-live="polite">
+    <p class="section-label">Task board</p>
+    <p class="board-updated" id="board-updated"></p>
+    <p id="board-empty" hidden>No open tasks.</p>
+    <div class="board-group waiting" id="board-waiting" hidden>
+      <p class="board-group-label">Waiting on Bud</p>
+      <ul class="board-list" id="board-waiting-list"></ul>
+    </div>
+    <div class="board-group doing" id="board-doing" hidden>
+      <p class="board-group-label">In progress</p>
+      <ul class="board-list" id="board-doing-list"></ul>
+      <p class="board-more" id="board-doing-more" hidden></p>
+    </div>
+    <p class="board-rest" id="board-rest" hidden></p>
+  </section>
 
   <section id="capture-section" aria-label="Capture mirror">
     <div class="capture-head">
@@ -967,12 +1035,14 @@ export function renderPage(): string {
   <p class="section-label below" id="details-label" hidden>Activity</p>
   <ul id="details-rail" aria-label="Stored activity" hidden></ul>
 
-  <footer>Drivr notes, to-dos, and ideas. Parked display only — do not tap this screen while driving. Connected means this browser is attached. It does not make in-car Grok aware. Open URL is /s/&lt;session&gt;. No secrets in the URL. <span class="ver">${GLASS_UI_VER}</span></footer>
+  <footer>Drivr notes and task board. Parked display only — do not tap this screen while driving. Connected means this browser is attached. It does not make in-car Grok aware. Open URL is /s/&lt;session&gt;. No secrets in the URL. <span class="ver">${GLASS_UI_VER}</span></footer>
 
   <script>
   (function () {
     var GLASS_UI_VER = "${GLASS_UI_VER}";
     var traces = [];
+    var boardTasks = [];
+    var boardUpdatedAt = "";
     var botsEl = document.getElementById("bots");
     var emptyEl = document.getElementById("empty");
     var statusEl = document.getElementById("status");
@@ -1026,6 +1096,110 @@ export function renderPage(): string {
       "#7dffa3", "#7ec8ff", "#ffb86b", "#d4a1ff",
       "#ff8fab", "#9ae66e", "#6ee7e0", "#ffd166"
     ];
+
+
+    var boardWaitingList = document.getElementById("board-waiting-list");
+    var boardDoingList = document.getElementById("board-doing-list");
+    var BOARD_DOING_MAX = 6;
+
+    function applyBoard(data) {
+      if (!data || !Array.isArray(data.tasks)) return;
+      boardTasks = data.tasks;
+      boardUpdatedAt = data.updatedAt ? String(data.updatedAt) : "";
+      renderBoard();
+    }
+
+    function boardMeta(t) {
+      var parts = [];
+      if (t && t.bot) parts.push(t.bot);
+      if (t && t.area) parts.push(t.area);
+      if (t && t.date) parts.push(t.date);
+      return parts.join(" · ");
+    }
+
+    function boardItemHtml(t) {
+      var meta = boardMeta(t);
+      return "<li class=\"board-item\"><p class=\"board-item-title\">" + esc(t && t.title ? t.title : "") + "</p>" +
+        (meta ? "<p class=\"board-item-meta\">" + esc(meta) + "</p>" : "") + "</li>";
+    }
+
+    function renderBoard() {
+      var waiting = [];
+      var doing = [];
+      var todo = 0;
+      var waitingRichard = 0;
+      boardTasks.forEach(function (t) {
+        if (!t) return;
+        if (t.column === "waiting") waiting.push(t);
+        else if (t.column === "doing") doing.push(t);
+        else if (t.column === "todo") todo += 1;
+        else if (t.column === "waiting_richard") waitingRichard += 1;
+      });
+      var emptyEl = document.getElementById("board-empty");
+      var waitingWrap = document.getElementById("board-waiting");
+      var doingWrap = document.getElementById("board-doing");
+      var moreEl = document.getElementById("board-doing-more");
+      var restEl = document.getElementById("board-rest");
+      var updatedEl = document.getElementById("board-updated");
+      if (updatedEl) {
+        if (boardUpdatedAt) {
+          try {
+            updatedEl.textContent = "Updated " + new Date(boardUpdatedAt).toLocaleString("en-US", {
+              timeZone: "America/Chicago", month: "short", day: "numeric", hour: "numeric", minute: "2-digit"
+            });
+          } catch (e) { updatedEl.textContent = ""; }
+        } else {
+          updatedEl.textContent = "";
+        }
+      }
+      var hasOpen = waiting.length || doing.length || todo || waitingRichard;
+      if (!hasOpen) {
+        if (emptyEl) emptyEl.hidden = false;
+        if (waitingWrap) waitingWrap.hidden = true;
+        if (doingWrap) doingWrap.hidden = true;
+        if (restEl) { restEl.hidden = true; restEl.textContent = ""; }
+        if (boardWaitingList) boardWaitingList.innerHTML = "";
+        if (boardDoingList) boardDoingList.innerHTML = "";
+        return;
+      }
+      if (emptyEl) emptyEl.hidden = true;
+      if (waitingWrap) waitingWrap.hidden = waiting.length === 0;
+      if (boardWaitingList) boardWaitingList.innerHTML = waiting.map(boardItemHtml).join("");
+      if (doingWrap) doingWrap.hidden = doing.length === 0;
+      var shown = doing.slice(0, BOARD_DOING_MAX);
+      if (boardDoingList) boardDoingList.innerHTML = shown.map(boardItemHtml).join("");
+      if (moreEl) {
+        if (doing.length > BOARD_DOING_MAX) {
+          moreEl.hidden = false;
+          moreEl.textContent = "+" + (doing.length - BOARD_DOING_MAX) + " more in progress";
+        } else {
+          moreEl.hidden = true;
+          moreEl.textContent = "";
+        }
+      }
+      if (restEl) {
+        var bits = [];
+        if (todo) bits.push(todo === 1 ? "1 to do" : todo + " to do");
+        if (waitingRichard) bits.push(waitingRichard === 1 ? "1 waiting on Richard" : waitingRichard + " waiting on Richard");
+        if (bits.length) {
+          restEl.hidden = false;
+          restEl.textContent = "Also " + bits.join(" · ");
+        } else {
+          restEl.hidden = true;
+          restEl.textContent = "";
+        }
+      }
+    }
+
+    function pullTasks() {
+      fetch(glassApi("/tasks"), { cache: "no-store", credentials: "same-origin" })
+        .then(function (r) {
+          if (!r.ok) throw new Error("tasks " + r.status);
+          return r.json();
+        })
+        .then(applyBoard)
+        .catch(function () { /* notes still work if the board cannot be read */ });
+    }
 
     function esc(s) {
       return String(s == null ? "" : s)
@@ -2711,6 +2885,9 @@ export function renderPage(): string {
           setStatus("Connected", "live");
         } catch (e) {}
       });
+      es.addEventListener("tasks", function (ev) {
+        try { applyBoard(JSON.parse(ev.data)); } catch (e) {}
+      });
       es.onerror = function () {
         setStatus("Reconnecting", "err");
         try { if (es) es.close(); } catch (e) {}
@@ -2725,7 +2902,9 @@ export function renderPage(): string {
     function bootstrap() {
       setStatus("Connecting", "");
       render();
+      renderBoard();
       pullList(true);
+      pullTasks();
     }
 
     bootstrap();
@@ -2733,6 +2912,7 @@ export function renderPage(): string {
     setInterval(function () {
       render();
       pullList(false);
+      pullTasks();
       // If EventSource looks dead, force reconnect.
       try {
         if (!es || es.readyState === 2) connect();
@@ -2741,11 +2921,13 @@ export function renderPage(): string {
     document.addEventListener("visibilitychange", function () {
       if (document.visibilityState === "visible") {
         pullList(false);
+        pullTasks();
         try { if (!es || es.readyState !== 1) connect(); } catch (e) {}
       }
     });
     window.addEventListener("pageshow", function () {
       pullList(false);
+      pullTasks();
       try { if (!es || es.readyState !== 1) connect(); } catch (e) {}
     });
   })();

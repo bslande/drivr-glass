@@ -227,3 +227,5 @@ export function isCaptureTrace(t: { kind?: string; status?: string; bot?: string
 export function isResearchTrace(t: { kind?: string }): boolean {
   return String(t.kind || "").toLowerCase() === "research";
 }
+
+export { clip as clipText, looksSensitive, stripSensitive };
