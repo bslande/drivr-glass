@@ -1,6 +1,15 @@
 /** Driving-safe Drivr cabin glass — tap-with-voice capture mirror + fleet cards. */
 
 import { GLASS_UI_VER } from "./ui-ver";
+import {
+  attrHidden,
+  bootJson,
+  emptyGlassPageData,
+  renderBoardMarkup,
+  renderCaptureMarkup,
+  renderPageHeadExtras,
+  type GlassPageData,
+} from "./page-ssr";
 
 function esc(s: string): string {
   return String(s)
@@ -70,6 +79,59 @@ export function renderLoginGate(sessionId: string): string {
     var timer = null;
     var polls = 0;
     var maxPolls = 36;
+    function canAjax() {
+      return !!(window.XMLHttpRequest || (window.fetch && window.Promise));
+    }
+    function xhrGet(url, done) {
+      var xhr;
+      try { xhr = new XMLHttpRequest(); } catch (e) { done({ status: 0, body: null }); return; }
+      xhr.onreadystatechange = function () {
+        if (xhr.readyState !== 4) return;
+        var body = null;
+        try { body = JSON.parse(xhr.responseText); } catch (e2) { body = null; }
+        done({ status: xhr.status, body: body });
+      };
+      try {
+        xhr.open("GET", url, true);
+        xhr.setRequestHeader("Accept", "application/json");
+        xhr.send();
+      } catch (e3) { done({ status: 0, body: null }); }
+    }
+    function xhrPost(url, done) {
+      var xhr;
+      try { xhr = new XMLHttpRequest(); } catch (e) { done({ status: 0, text: "" }); return; }
+      xhr.onreadystatechange = function () {
+        if (xhr.readyState !== 4) return;
+        done({ status: xhr.status, text: xhr.responseText || "" });
+      };
+      try {
+        xhr.open("POST", url, true);
+        xhr.setRequestHeader("Accept", "application/json");
+        xhr.send();
+      } catch (e3) { done({ status: 0, text: "" }); }
+    }
+    function getJson(url, done) {
+      if (window.fetch && window.Promise) {
+        fetch(url, { headers: { "Accept": "application/json" }, cache: "no-store", credentials: "same-origin" })
+          .then(function (r) { return r.text().then(function (text) {
+            var body = null;
+            try { body = JSON.parse(text); } catch (e) { body = null; }
+            done({ status: r.status, body: body });
+          }); })
+          .catch(function () { xhrGet(url, done); });
+        return;
+      }
+      xhrGet(url, done);
+    }
+    function postText(url, done) {
+      if (window.fetch && window.Promise) {
+        fetch(url, { method: "POST", headers: { "Accept": "application/json" }, credentials: "same-origin" })
+          .then(function (r) { return r.text().then(function (text) { done({ status: r.status, text: text }); }); })
+          .catch(function () { xhrPost(url, done); });
+        return;
+      }
+      xhrPost(url, done);
+    }
     function fail(text) {
       if (timer) clearTimeout(timer);
       timer = null;
@@ -79,44 +141,38 @@ export function renderLoginGate(sessionId: string): string {
     function poll() {
       if (polls >= maxPolls) { fail("Pairing expired. Pair again if you are still parked."); return; }
       polls += 1;
-      fetch(waitUrl, { headers: { "Accept": "application/json" }, cache: "no-store", credentials: "same-origin" })
-        .then(function (r) { return r.json().then(function (body) { return { status: r.status, body: body }; }); })
-        .then(function (res) {
-          if (res.body && res.body.state === "ready") {
-            errorEl.textContent = "";
-            statusEl.textContent = "Paired. Opening notes.";
-            window.location.assign(pairUrl.replace(/\\/pair$/, ""));
-            return;
-          }
-          if (res.status !== 200 || !res.body || res.body.state !== "pending") {
-            fail("Pairing ended (" + res.status + "). Pair again if you are still parked.");
-            return;
-          }
-          timer = setTimeout(poll, 5000);
-        })
-        .catch(function () { fail("Could not check pairing. The button below still sends the request."); });
+      getJson(waitUrl, function (res) {
+        if (res.body && res.body.state === "ready") {
+          errorEl.textContent = "";
+          statusEl.textContent = "Paired. Opening notes.";
+          window.location.assign(pairUrl.replace(/\\/pair$/, ""));
+          return;
+        }
+        if (res.status !== 200 || !res.body || res.body.state !== "pending") {
+          fail("Pairing ended (" + res.status + "). Pair again if you are still parked.");
+          return;
+        }
+        timer = setTimeout(poll, 5000);
+      });
     }
     form.addEventListener("submit", function (ev) {
-      if (!window.fetch || !window.Promise) return;
+      if (!canAjax()) return;
       ev.preventDefault();
       startBtn.disabled = true;
       errorEl.textContent = "";
-      fetch(pairUrl, { method: "POST", headers: { "Accept": "application/json" }, credentials: "same-origin" })
-        .then(function (r) { return r.text().then(function (text) { return { status: r.status, text: text }; }); })
-        .then(function (res) {
-          var body = null;
-          try { body = JSON.parse(res.text); } catch (e) { body = null; }
-          if (res.status !== 201 || !body || !body.requestId || !body.phrase) {
-            fail(body && body.error ? String(body.error) : ("Pairing did not start (HTTP " + res.status + ")."));
-            return;
-          }
-          document.getElementById("request-id").textContent = body.requestId;
-          document.getElementById("phrase").textContent = body.phrase;
-          waitEl.style.display = "block";
-          polls = 0;
-          poll();
-        })
-        .catch(function () { fail("Could not start pairing. Submit the button again."); });
+      postText(pairUrl, function (res) {
+        var body = null;
+        try { body = JSON.parse(res.text); } catch (e) { body = null; }
+        if (res.status !== 201 || !body || !body.requestId || !body.phrase) {
+          fail(body && body.error ? String(body.error) : ("Pairing did not start (HTTP " + res.status + ")."));
+          return;
+        }
+        document.getElementById("request-id").textContent = body.requestId;
+        document.getElementById("phrase").textContent = body.phrase;
+        waitEl.style.display = "block";
+        polls = 0;
+        poll();
+      });
     });
   })();
   </script>
@@ -180,7 +236,13 @@ export function renderPairMessage(sessionId: string, message: string): string {
 </html>`;
 }
 
-export function renderPage(): string {
+export function renderPage(data?: GlassPageData): string {
+  const d = data || emptyGlassPageData("");
+  const board = renderBoardMarkup(d.tasks, d.updatedAt);
+  const cap = renderCaptureMarkup(d.traces);
+  const statusText = d.ssr ? "Loaded" : "Connecting";
+  const headExtras = renderPageHeadExtras(d);
+  const boot = bootJson(d);
   return `<!DOCTYPE html>
 <html lang="en" data-ui-ver="${GLASS_UI_VER}">
 <head>
@@ -191,6 +253,7 @@ export function renderPage(): string {
   <meta name="theme-color" content="#050607" />
   <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
+${headExtras}
   <title>Drivr · Cabin</title>
   <style>
     :root {
@@ -979,36 +1042,36 @@ export function renderPage(): string {
     <div class="brand">Drivr · Notes</div>
     <div class="header-meta">
       <span class="glass-mode" id="glass-mode">Glass idle</span>
-      <div class="status" id="status"><span class="live-dot" aria-hidden="true"></span><span id="status-text">Connecting</span></div>
+      <div class="status" id="status"><span class="live-dot" aria-hidden="true"></span><span id="status-text">${statusText}</span></div>
     </div>
   </header>
 
   <section id="board-section" aria-label="Task board" aria-live="polite">
     <p class="section-label">Task board</p>
-    <p class="board-updated" id="board-updated"></p>
-    <p id="board-empty" hidden>No open tasks.</p>
-    <div class="board-group waiting" id="board-waiting" hidden>
+    <p class="board-updated" id="board-updated">${esc(board.updated)}</p>
+    <p id="board-empty"${attrHidden(board.emptyHidden)}>No open tasks.</p>
+    <div class="board-group waiting" id="board-waiting"${attrHidden(board.waitingHidden)}>
       <p class="board-group-label">Waiting on Bud</p>
-      <ul class="board-list" id="board-waiting-list"></ul>
+      <ul class="board-list" id="board-waiting-list">${board.waitingItems}</ul>
     </div>
-    <div class="board-group doing" id="board-doing" hidden>
+    <div class="board-group doing" id="board-doing"${attrHidden(board.doingHidden)}>
       <p class="board-group-label">In progress</p>
-      <ul class="board-list" id="board-doing-list"></ul>
-      <p class="board-more" id="board-doing-more" hidden></p>
+      <ul class="board-list" id="board-doing-list">${board.doingItems}</ul>
+      <p class="board-more" id="board-doing-more"${attrHidden(board.moreHidden)}>${esc(board.moreText)}</p>
     </div>
-    <p class="board-rest" id="board-rest" hidden></p>
+    <p class="board-rest" id="board-rest"${attrHidden(board.restHidden)}>${esc(board.restText)}</p>
   </section>
 
   <section id="capture-section" aria-label="Capture mirror">
     <div class="capture-head">
       <p class="section-label capture-label">Capture</p>
-      <span class="capture-count" id="capture-count" hidden></span>
+      <span class="capture-count" id="capture-count"${attrHidden(cap.countHidden)}>${esc(cap.countText)}</span>
     </div>
-    <ul id="capture-list" aria-live="polite" aria-label="Open to-dos, ideas, and notes"></ul>
-    <p class="capture-empty" id="capture-empty">No open notes yet — start a Drivr capture.</p>
-    <details class="capture-done-wrap" id="capture-done-wrap" hidden>
-      <summary class="capture-done-summary" id="capture-done-summary">Done this drive</summary>
-      <ul id="capture-done-list" aria-label="Completed capture items"></ul>
+    <ul id="capture-list" aria-live="polite" aria-label="Open to-dos, ideas, and notes">${cap.listHtml}</ul>
+    <p class="capture-empty" id="capture-empty"${attrHidden(cap.emptyHidden)}>No open notes yet — start a Drivr capture.</p>
+    <details class="capture-done-wrap" id="capture-done-wrap"${attrHidden(cap.doneHidden)}>
+      <summary class="capture-done-summary" id="capture-done-summary">${esc(cap.doneSummary)}</summary>
+      <ul id="capture-done-list" aria-label="Completed capture items">${cap.doneHtml}</ul>
     </details>
   </section>
 
@@ -1037,6 +1100,7 @@ export function renderPage(): string {
 
   <footer>Drivr notes and task board. Parked display only — do not tap this screen while driving. Connected means this browser is attached. It does not make in-car Grok aware. Open URL is /s/&lt;session&gt;. No secrets in the URL. <span class="ver">${GLASS_UI_VER}</span></footer>
 
+  <script type="application/json" id="glass-boot">${boot}</script>
   <script>
   (function () {
     var GLASS_UI_VER = "${GLASS_UI_VER}";
@@ -1078,6 +1142,97 @@ export function renderPage(): string {
     function glassApi(path) {
       return SESSION_PREFIX + path;
     }
+
+    var FETCH_MS = 8000;
+    var SSE_OPEN_MS = 5000;
+    var POLL_MS = 8000;
+
+    function bust(url) {
+      var join = url.indexOf("?") >= 0 ? "&" : "?";
+      return url + join + "_t=" + Date.now();
+    }
+
+    function xhrJson(url, timeoutMs, done) {
+      var xhr;
+      try { xhr = new XMLHttpRequest(); } catch (e) { done(new Error("no xhr"), null, 0); return; }
+      var timer = setTimeout(function () {
+        try { xhr.abort(); } catch (e2) {}
+        done(new Error("timeout"), null, 0);
+      }, timeoutMs || FETCH_MS);
+      xhr.onreadystatechange = function () {
+        if (xhr.readyState !== 4) return;
+        clearTimeout(timer);
+        var body = null;
+        try { body = JSON.parse(xhr.responseText); } catch (e3) { body = null; }
+        if (xhr.status >= 200 && xhr.status < 300 && body) done(null, body, xhr.status);
+        else done(new Error("http " + xhr.status), body, xhr.status);
+      };
+      try {
+        xhr.open("GET", bust(url), true);
+        xhr.setRequestHeader("Accept", "application/json");
+        xhr.send();
+      } catch (e4) {
+        clearTimeout(timer);
+        done(e4, null, 0);
+      }
+    }
+
+    function requestJson(url, timeoutMs, done) {
+      var finished = false;
+      function finish(err, body, status) {
+        if (finished) return;
+        finished = true;
+        done(err, body, status);
+      }
+      if (window.fetch && window.Promise) {
+        var usedXhr = false;
+        var timer = setTimeout(function () {
+          if (finished) return;
+          usedXhr = true;
+          xhrJson(url, timeoutMs, finish);
+        }, timeoutMs || FETCH_MS);
+        fetch(bust(url), { cache: "no-store", credentials: "same-origin" })
+          .then(function (r) {
+            if (usedXhr) return null;
+            return r.text().then(function (text) {
+              return { status: r.status, ok: r.ok, text: text };
+            });
+          })
+          .then(function (res) {
+            if (usedXhr || !res) return;
+            clearTimeout(timer);
+            var body = null;
+            try { body = JSON.parse(res.text); } catch (e) { body = null; }
+            if (res.ok && body) finish(null, body, res.status);
+            else finish(new Error("http " + res.status), body, res.status);
+          })
+          .catch(function () {
+            if (usedXhr || finished) return;
+            clearTimeout(timer);
+            xhrJson(url, timeoutMs, finish);
+          });
+        return;
+      }
+      xhrJson(url, timeoutMs, finish);
+    }
+
+    function takeOverNoJs() {
+      var metas = document.getElementsByTagName("meta");
+      var i;
+      for (i = metas.length - 1; i >= 0; i--) {
+        var httpEq = metas[i].getAttribute("http-equiv");
+        if (httpEq && String(httpEq).toLowerCase() === "refresh") {
+          if (metas[i].parentNode) metas[i].parentNode.removeChild(metas[i]);
+        }
+      }
+      try {
+        var href = String(location.href || "");
+        if (href.indexOf("nojs=") >= 0 && window.history && history.replaceState) {
+          var next = href.replace(/([?&])nojs=1&?/, "$1").replace(/[?&]$/, "");
+          history.replaceState({}, "", next);
+        }
+      } catch (e) {}
+    }
     var fleetOpen = true;
     var ACTIVE_MS = 5 * 60 * 1000;
     var RICH_MIN = 200;
@@ -1101,6 +1256,26 @@ export function renderPage(): string {
     var boardWaitingList = document.getElementById("board-waiting-list");
     var boardDoingList = document.getElementById("board-doing-list");
     var BOARD_DOING_MAX = 6;
+    var bootReady = false;
+    var bootSsr = false;
+
+    function readBoot() {
+      var el = document.getElementById("glass-boot");
+      if (!el) return;
+      var raw = el.textContent || el.innerHTML || "";
+      if (!raw) return;
+      try {
+        var data = JSON.parse(raw);
+        if (data && Array.isArray(data.traces)) traces = data.traces;
+        if (data && Array.isArray(data.tasks)) {
+          boardTasks = data.tasks;
+          boardUpdatedAt = data.updatedAt ? String(data.updatedAt) : "";
+        }
+        bootSsr = !!(data && data.ssr);
+        bootReady = true;
+      } catch (e) {}
+    }
+    readBoot();
 
     function applyBoard(data) {
       if (!data || !Array.isArray(data.tasks)) return;
@@ -1191,22 +1366,16 @@ export function renderPage(): string {
       }
     }
 
-    function pullTasks() {
-      fetch(glassApi("/tasks"), { cache: "no-store", credentials: "same-origin" })
-        .then(function (r) {
-          if (!r.ok) throw new Error("tasks " + r.status);
-          return r.json();
-        })
-        .then(applyBoard)
-        .catch(function () { /* notes still work if the board cannot be read */ });
-    }
-
     function esc(s) {
       return String(s == null ? "" : s)
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;");
+    }
+
+    function rtrim(s) {
+      return String(s == null ? "" : s).replace(/\s+$/g, "");
     }
 
     function plain(s) {
@@ -1232,7 +1401,7 @@ export function renderPage(): string {
         var last = segs.length ? segs[segs.length - 1] : "";
         last = last.replace(/[-_]+/g, " ").replace(/\\.[a-z0-9]{1,5}$/i, "");
         if (last && last.length <= 40) return host + " · " + last;
-        if (last) return host + " · " + last.slice(0, 36) + "…";
+        if (last) return host + " · " + rtrim(last.slice(0, 36)) + "…";
         return host;
       } catch (e) {
         return "site";
@@ -1451,7 +1620,7 @@ export function renderPage(): string {
 
     function clipDense(s, n) {
       var t = String(s || "").replace(/\\s+/g, " ").trim();
-      if (t.length > n) t = t.slice(0, n - 1).trimEnd() + "…";
+      if (t.length > n) t = rtrim(t.slice(0, n - 1)) + "…";
       return t;
     }
 
@@ -1919,7 +2088,7 @@ export function renderPage(): string {
 
       function clip(s) {
         var t = String(s || "").replace(/\\s+/g, " ").trim();
-        if (t.length > 420) t = t.slice(0, 419).trimEnd() + "…";
+        if (t.length > 420) t = rtrim(t.slice(0, 419)) + "…";
         return t;
       }
 
@@ -1978,7 +2147,7 @@ export function renderPage(): string {
             var s = String(b).replace(/\\s+/g, " ").trim();
             var cut = s.split(/[.;]/)[0].trim();
             if (cut.length >= 12 && cut.length <= 100) s = cut;
-            else if (s.length > 100) s = s.slice(0, 99).trimEnd() + "…";
+            else if (s.length > 100) s = rtrim(s.slice(0, 99)) + "…";
             return s;
           });
           var findings;
@@ -2813,15 +2982,33 @@ export function renderPage(): string {
     }
 
 
-    /** Stale Tesla WebViews keep old JS over SSE; reload once when server UI version differs. */
+    /** Stale Tesla WebViews keep old JS over SSE; reload at most once per 60s. */
     function maybeReloadForUi(serverUi) {
       if (!serverUi || String(serverUi) === GLASS_UI_VER) return false;
-      var key = "glass-ui-reload:" + String(serverUi);
+      var now = Date.now();
+      var capMs = 60000;
+      var uir = 0;
       try {
-        if (sessionStorage.getItem(key) === "1") return false;
-        sessionStorage.setItem(key, "1");
-      } catch (e) {}
-      try { location.reload(); } catch (e2) {}
+        var q = String(location.search || "");
+        var m = /(?:^|[?&])uir=(\d+)/.exec(q);
+        if (m) uir = parseInt(m[1], 10) || 0;
+      } catch (e0) {}
+      if (uir && now - uir < capMs) return false;
+      try {
+        var prevRaw = sessionStorage.getItem("glass-ui-reload");
+        var prev = prevRaw ? (parseInt(prevRaw, 10) || 0) : 0;
+        if (prev && now - prev < capMs) return false;
+        sessionStorage.setItem("glass-ui-reload", String(now));
+      } catch (e1) {}
+      try {
+        var href = String(location.href || "");
+        var next;
+        if (/[?&]uir=\d+/.test(href)) next = href.replace(/([?&])uir=\d+/, "$1uir=" + now);
+        else next = href + (href.indexOf("?") >= 0 ? "&" : "?") + "uir=" + now;
+        location.replace(next);
+      } catch (e2) {
+        try { location.reload(); } catch (e3) {}
+      }
       return true;
     }
 
@@ -2840,22 +3027,37 @@ export function renderPage(): string {
       return false;
     }
 
+    var firstListOk = false;
+
+    function markFetched(ok) {
+      if (ok) {
+        firstListOk = true;
+        if (!sseIsOpen()) setStatus("Loaded", "live");
+        else setStatus("Connected", "live");
+      } else if (!firstListOk && !bootSsr) {
+        setStatus("Reconnecting", "err");
+      }
+    }
+
     function pullList(thenConnect) {
-      fetch(glassApi("/list"), { cache: "no-store" })
-        .then(function (r) {
-          if (!r.ok) throw new Error("list " + r.status);
-          return r.json();
-        })
-        .then(function (data) {
-          if (applyServerPayload(data)) return;
-          setStatus("Connected", "live");
+      requestJson(glassApi("/list"), FETCH_MS, function (err, data, status) {
+        if (err || !data) {
+          try { console.error("glass list pull", err); } catch (e) {}
+          markFetched(false);
           if (thenConnect) connect();
-        })
-        .catch(function (err) {
-          try { console.error("screenr list pull", err); } catch (e) {}
-          setStatus("Reconnecting", "err");
-          if (thenConnect) connect();
-        });
+          return;
+        }
+        if (applyServerPayload(data)) return;
+        markFetched(true);
+        if (thenConnect) connect();
+      });
+    }
+
+    function pullTasks() {
+      requestJson(glassApi("/tasks"), FETCH_MS, function (err, data) {
+        if (err || !data) return;
+        applyBoard(data);
+      });
     }
 
     function sseIsOpen() {
@@ -2863,9 +3065,33 @@ export function renderPage(): string {
     }
 
     var sseWanted = true;
+    var pollTimer = null;
+    var sseOpenWatch = null;
+
+    function startPollFallback() {
+      if (pollTimer) return;
+      pollTimer = setInterval(function () {
+        var hidden = false;
+        try { hidden = document.visibilityState === "hidden"; } catch (e) {}
+        if (hidden) return;
+        if (!sseIsOpen()) {
+          pullList(false);
+          pullTasks();
+        }
+      }, POLL_MS);
+    }
+
+    function stopPollFallback() {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    }
+
+    function clearSseOpenWatch() {
+      if (sseOpenWatch) { clearTimeout(sseOpenWatch); sseOpenWatch = null; }
+    }
 
     function disconnect() {
       sseWanted = false;
+      clearSseOpenWatch();
       if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
       if (es) {
         try { es.close(); } catch (e) {}
@@ -2877,43 +3103,58 @@ export function renderPage(): string {
       sseWanted = true;
       try { if (document.visibilityState === "hidden") return; } catch (e) {}
       if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+      clearSseOpenWatch();
       if (es) {
-        try { es.close(); } catch (e) {}
+        try { es.close(); } catch (e2) {}
         es = null;
+      }
+      if (typeof EventSource !== "function") {
+        startPollFallback();
+        return;
       }
       var url = glassApi("/events");
       try {
         es = new EventSource(url);
-      } catch (e) {
-        setStatus("Reconnecting", "err");
+      } catch (e3) {
+        startPollFallback();
         retryTimer = setTimeout(connect, 3000);
         return;
       }
+      sseOpenWatch = setTimeout(function () {
+        sseOpenWatch = null;
+        if (!sseIsOpen()) startPollFallback();
+      }, SSE_OPEN_MS);
       es.addEventListener("snapshot", function (ev) {
         try {
           var data = JSON.parse(ev.data);
           if (applyServerPayload(data)) return;
+          clearSseOpenWatch();
+          stopPollFallback();
           setStatus("Connected", "live");
-        } catch (e) {}
+        } catch (e4) {}
       });
       es.addEventListener("trace", function (ev) {
         try {
           upsert(JSON.parse(ev.data));
+          clearSseOpenWatch();
+          stopPollFallback();
           setStatus("Connected", "live");
-        } catch (e) {}
+        } catch (e5) {}
       });
       es.addEventListener("tasks", function (ev) {
-        try { applyBoard(JSON.parse(ev.data)); } catch (e) {}
+        try { applyBoard(JSON.parse(ev.data)); } catch (e6) {}
       });
       es.onerror = function () {
         var hidden = false;
-        try { hidden = document.visibilityState === "hidden" || !sseWanted; } catch (e) {}
+        try { hidden = document.visibilityState === "hidden" || !sseWanted; } catch (e7) {}
         if (hidden) {
           disconnect();
           return;
         }
-        setStatus("Reconnecting", "err");
-        try { if (es) es.close(); } catch (e) {}
+        startPollFallback();
+        if (firstListOk || bootSsr) setStatus("Loaded", "live");
+        else setStatus("Reconnecting", "err");
+        try { if (es) es.close(); } catch (e8) {}
         es = null;
         pullList(false);
         pullTasks();
@@ -2922,28 +3163,37 @@ export function renderPage(): string {
       };
     }
 
+    function hasSsrDom() {
+      try {
+        if (boardWaitingList && boardWaitingList.children && boardWaitingList.children.length) return true;
+        if (boardDoingList && boardDoingList.children && boardDoingList.children.length) return true;
+        if (captureList && captureList.children && captureList.children.length) return true;
+      } catch (e) {}
+      return false;
+    }
+
     function bootstrap() {
-      setStatus("Connecting", "");
-      render();
-      renderBoard();
+      takeOverNoJs();
+      if (bootSsr || (traces && traces.length) || (boardTasks && boardTasks.length) || hasSsrDom()) {
+        setStatus("Loaded", "live");
+      } else {
+        setStatus("Connecting", "");
+      }
+      if (bootReady || !hasSsrDom()) {
+        render();
+        renderBoard();
+      }
       pullList(true);
       pullTasks();
     }
 
-    bootstrap();
-    // SSE is the live path. Poll /list and /tasks only about every 60s, and only
-    // while the page is visible and EventSource is down. Closing SSE when hidden
-    // lets the Durable Object hibernate and saves Free-plan duration.
+    try { bootstrap(); } catch (bootErr) {
+      try { startPollFallback(); } catch (e) {}
+    }
+    // Relative times refresh once a minute. Live data uses SSE when it opens,
+    // otherwise /list and /tasks poll every 8s while visible.
     setInterval(function () {
-      render();
-      var hidden = false;
-      try { hidden = document.visibilityState === "hidden"; } catch (e) {}
-      if (hidden) return;
-      if (!sseIsOpen()) {
-        pullList(false);
-        pullTasks();
-        try { if (!es || es.readyState === 2) connect(); } catch (e) {}
-      }
+      try { render(); } catch (e) {}
     }, 60000);
     document.addEventListener("visibilitychange", function () {
       if (document.visibilityState === "visible") {
