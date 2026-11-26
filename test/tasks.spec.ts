@@ -220,12 +220,62 @@ describe("task board store", () => {
     expect(html).toContain('glassApi("/tasks")');
     expect(html).toContain("Waiting on Bud");
     expect(html).toContain("Parked display only");
-    expect(html).toContain("v-task-board-2");
+    expect(html).toContain("v-task-board-3");
     expect(html).not.toContain(token());
     expect(html).toContain('id="capture-section"');
-    expect(html).toContain("60000");
+    expect(html).toContain("XMLHttpRequest");
     expect(html).toContain("disconnect");
-    expect(html).not.toContain("5000");
+    expect(html).toContain("POLL_MS");
+    expect(html).toContain('id="glass-boot"');
+    expect(html).toContain('http-equiv="refresh"');
+    expect(html).toContain("nojs=1");
+  });
+
+  it("server-renders board and capture items for a paired cookie or bearer session", async () => {
+    const put = await call(sessionUrl("/tasks"), {
+      method: "PUT",
+      headers: bearer({ "Content-Type": "application/json" }),
+      body: JSON.stringify(sample),
+    });
+    expect(put.status).toBe(200);
+
+    const pushed = await call(sessionUrl("/push"), {
+      method: "POST",
+      headers: bearer({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        bot: "Drivr",
+        kind: "todo",
+        summary: "Cabin capture visible without script",
+        detail: "This row must appear in the HTML before JS runs.",
+        status: "open",
+      }),
+    });
+    expect(pushed.status).toBe(201);
+
+    const page = await call(sessionUrl(), { headers: bearer() });
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain("Monitoring Mayfield-for-Maye claim");
+    expect(html).toContain("Line up lumbar install steps once the parts arrive");
+    expect(html).toContain("Cabin capture visible without script");
+    expect(html).toContain('id="status-text">Loaded<');
+    expect(html).not.toContain(token());
+    expect(html).toContain("Cabin capture visible without script");
+
+    const nojs = await call(sessionUrl("?nojs=1"), { headers: bearer() });
+    expect(nojs.status).toBe(200);
+    const nojsHtml = await nojs.text();
+    expect(nojsHtml).toContain('http-equiv="refresh" content="30"');
+    expect(nojsHtml).toContain("Monitoring Mayfield-for-Maye claim");
+    expect(nojsHtml).not.toContain(token());
+
+    const cookie = await pairedReadCookie();
+    const viaCookie = await call(sessionUrl(), { headers: { Cookie: cookie } });
+    expect(viaCookie.status).toBe(200);
+    const cookieHtml = await viaCookie.text();
+    expect(cookieHtml).toContain("Monitoring Mayfield-for-Maye claim");
+    expect(cookieHtml).toContain('id="status-text">Loaded<');
+    expect(cookieHtml).not.toContain(token());
   });
 
   it("upserts a task with PATCH, is idempotent, and rejects cookie writes", async () => {

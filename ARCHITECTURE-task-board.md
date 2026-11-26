@@ -1,6 +1,6 @@
 # Task board architecture (Drivr glass)
 
-Short design notes for the in-car task board and drive-start refresh, so other bots can review efficiency. This is live on the Workers Free Worker `drivr-glass` as version `2026.11.23-3`. This file lives at the repo root. Deploy from this fork (`bslande/drivr-glass`), not `GlobalTC/drivr-glass`. Never put `PUSH_TOKEN`, a session id, or `*.local` files in git, Pages, or URLs.
+Short design notes for the in-car task board and drive-start refresh, so other bots can review efficiency. This is live on the Workers Free Worker `drivr-glass` as version `2026.11.26-1`. This file lives at the repo root. Deploy from this fork (`bslande/drivr-glass`), not `GlobalTC/drivr-glass`. Never put `PUSH_TOKEN`, a session id, or `*.local` files in git, Pages, or URLs.
 
 ## Goal
 
@@ -14,7 +14,7 @@ The Cursor Page is a snapshot of the same data. It holds no token or session URL
 | --- | --- | --- |
 | Worker `drivr-glass` | Cloudflare Workers Free | Routes, auth, cabin HTML |
 | Durable Object `TraceHub`, instance `fleet` | SQLite class, migration tag `v1` already applied — never resend it | Notes *and* the task board in one object |
-| Cabin page | Rendered by the Worker, UI `v-task-board-2` | Read-only board + existing Capture notes |
+| Cabin page | Rendered by the Worker, UI `v-task-board-3` | Read-only board + existing Capture notes |
 | Mac mini listener | `launchd` `com.budlande.drivr-board-drive-sync`, source in `scripts/macmini/` | On drive start, POST `/tasks/refresh` only — never PUT |
 | TeslaMate MQTT | Existing Mosquitto on the mini, Docker network only, TeslaMate **v4.4.0** | Drive-start signal (`state=driving` or `shift_state` `D`/`R`) |
 | Cursor Page | Snapshot only | Human-readable board; no live auth |
@@ -43,7 +43,7 @@ Pairing is unchanged: parked browser starts a 180s request, Drivr approves with 
 
 ## Cabin UI
 
-`src/page.ts`, UI version `v-task-board-2` (bumped so a stale Tesla WebView reloads). The Task board sits above Capture: Waiting on Bud first, then In progress (up to six items, then a “+N more” line). Other columns are a one-line count. Large type, no board buttons, no interaction required while moving. Capture/notes rendering is unchanged.
+`src/page.ts`, UI version `v-task-board-3` (bumped so a stale Tesla WebView reloads). The Task board sits above Capture: Waiting on Bud first, then In progress (up to six items, then a “+N more” line). Other columns are a one-line count. Large type, no board buttons, no interaction required while moving. Capture/notes rendering is unchanged. Paired HTML is server-rendered so the board and capture lists are visible if cabin JS never runs, with a no-JS `?nojs=1` 30-second meta refresh that script disables once it takes over. Cabin JS stays ES5-safe (XHR fallback, 8s poll if EventSource does not open in 5s) and caps UI-version reloads at one per 60 seconds.
 
 ## How the glass stays current
 

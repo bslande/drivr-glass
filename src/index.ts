@@ -1,7 +1,8 @@
 import { TraceHub } from "./trace-hub";
 import { sanitizeTrace, type RawTrace, type Trace } from "./sanitize";
-import { sanitizeTaskBoard, sanitizeTaskPatch } from "./board-tasks";
+import { sanitizeTaskBoard, sanitizeTaskPatch, type BoardTask } from "./board-tasks";
 import { renderLoginGate, renderPage, renderPairMessage, renderPairPending } from "./page";
+import { emptyGlassPageData, type GlassPageData } from "./page-ssr";
 import { GLASS_UI_VER } from "./ui-ver";
 import { CONSTITUTION_RULES } from "./constitution";
 import {
@@ -67,6 +68,41 @@ async function authorizePush(request: Request, env: Env): Promise<boolean> {
 
 function hubStub(env: Env): DurableObjectStub<TraceHub> {
   return env.TRACE_HUB.getByName("fleet");
+}
+
+async function loadGlassPageData(env: Env, request: Request, noJs: boolean): Promise<GlassPageData> {
+  const data = emptyGlassPageData(env.GLASS_SESSION_ID, noJs);
+  try {
+    const stub = hubStub(env);
+    const [listResp, tasksResp] = await Promise.all([
+      stub.fetch(new Request(new URL("/list", request.url), { method: "GET" })),
+      stub.fetch(new Request(new URL("/tasks", request.url), { method: "GET" })),
+    ]);
+    let ok = false;
+    if (listResp.ok) {
+      try {
+        const body = (await listResp.json()) as { traces?: Trace[] };
+        if (Array.isArray(body.traces)) {
+          data.traces = body.traces;
+          ok = true;
+        }
+      } catch { /* leave traces empty */ }
+    }
+    if (tasksResp.ok) {
+      try {
+        const body = (await tasksResp.json()) as { tasks?: BoardTask[]; updatedAt?: string };
+        if (Array.isArray(body.tasks)) {
+          data.tasks = body.tasks;
+          data.updatedAt = body.updatedAt ? String(body.updatedAt) : "";
+          ok = true;
+        }
+      } catch { /* leave tasks empty */ }
+    }
+    data.ssr = ok;
+  } catch {
+    data.ssr = false;
+  }
+  return data;
 }
 
 /**
@@ -265,7 +301,18 @@ export default {
           headers: { ...PRIVATE_HEADERS, "Content-Type": "text/html; charset=utf-8" },
         });
       }
-      return new Response(isHead ? null : renderPage(), {
+      if (isHead) {
+        return new Response(null, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            ...PRIVATE_HEADERS,
+          },
+        });
+      }
+      const noJs = new URL(request.url).searchParams.get("nojs") === "1";
+      const pageData = await loadGlassPageData(env, request, noJs);
+      return new Response(renderPage(pageData), {
         status: 200,
         headers: {
           "Content-Type": "text/html; charset=utf-8",
